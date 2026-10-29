@@ -142,7 +142,7 @@ namespace
 		const std::string description = Util::ToUpperAscii(stl::utf16_to_utf8(wideDescription).value_or(""));
 
 		// Pre-RDNA "HD"-branded GCN cards (e.g. "Radeon HD 7970") fall in the same 7000-7999
-		// numeric range as RX 7000 without being FSR 4.1.1-capable; reject them before the scan.
+		// numeric range as RX 7000 without being FSR 4-capable; reject them before the scan.
 		if (description.find("RADEON HD") != std::string::npos)
 			return FidelityFX::Fsr4AdapterSupport::Unsupported;
 
@@ -158,7 +158,7 @@ namespace
 		}
 
 		// Only accept explicit discrete RDNA3 dies here, never a bare "RDNA 3"/"RDNA3" marker --
-		// that also matches RDNA3 integrated GPUs, which FSR 4.1.1 does not support.
+		// that also matches RDNA3 integrated GPUs, which FSR 4 does not support.
 		if (description.find("NAVI31") != std::string::npos ||
 			description.find("NAVI 31") != std::string::npos ||
 			description.find("NAVI32") != std::string::npos ||
@@ -729,11 +729,11 @@ bool FidelityFX::CanUseRuntimeUpscalerPath()
 
 bool FidelityFX::ShouldRequestRuntimeFsr4() const
 {
-	// fsr4RuntimeEnable is restart-gated (kRestartFields): read the boot-latched
-	// value, not the live setting, so a mid-session toggle can't request FSR4
-	// before the restart the UI already told the user this setting needs.
+	// The method slot is restart-gated where PerfMode latches it (kRestartFields):
+	// IsRuntimeFsr4MethodSelected() reads the boot-latched value, so a mid-session
+	// dropdown change can't request FSR4 before the restart the UI asked for.
 	auto& upscaling = globals::features::upscaling;
-	return upscaling.bootSnapshot.Boot(&Upscaling::Settings::fsr4RuntimeEnable) &&
+	return upscaling.IsRuntimeFsr4MethodSelected() &&
 	       !runtimeFsr4FailureLatched &&
 	       IsRuntimeFsr4Available();
 }

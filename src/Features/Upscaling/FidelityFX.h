@@ -23,6 +23,7 @@
 #include "../../Buffer.h"
 #include "../../State.h"
 #include "DX12SwapChain.h"
+#include "Fsr4Support.h"
 
 /** @brief Manages AMD FidelityFX upscaling and frame generation, including the host FSR3 SDK and the runtime-loaded FSR4 provider. */
 class FidelityFX
@@ -83,13 +84,7 @@ public:
 	void Upscale(ID3D11Resource* a_upscalingTexture, ID3D11Resource* a_depth, ID3D11Resource* a_reactiveMask, ID3D11Resource* a_transparencyCompositionMask, ID3D11Resource* a_motionVectors, float a_sharpness, ID3D11Resource* a_colorOut = nullptr);
 
 	/** @brief AMD adapter classes eligible to request runtime FSR4: RX 6000, RX 7000 and RX 9000. */
-	enum class Fsr4AdapterSupport
-	{
-		Unsupported,
-		RadeonRx6000,
-		RadeonRx7000,
-		RadeonRx9000
-	};
+	using Fsr4AdapterSupport = Fsr4::AdapterClass;
 
 	// Runtime upscaler provider (amd_fidelityfx_upscaler_dx12.dll): on eligible AMD hardware,
 	// dispatches via the runtime DLL instead of the host FSR3 SDK. See RuntimeUpscaler.cpp.
@@ -99,9 +94,9 @@ public:
 	bool IsNvidiaAdapterDetected() const;
 	/** @brief True if the runtime upscaler DLL was found and loaded. */
 	bool IsRuntimeUpscalerPresent() const;
-	/** @brief Classifies an adapter's FSR 4.1.1 eligibility from its DXGI description. */
+	/** @brief Classifies an adapter's FSR 4 eligibility from its DXGI description. */
 	static Fsr4AdapterSupport GetFsr4AdapterSupport(const DXGI_ADAPTER_DESC& a_adapterDesc);
-	/** @brief Classifies the active adapter's FSR 4.1.1 eligibility. */
+	/** @brief Classifies the active adapter's FSR 4 eligibility. */
 	Fsr4AdapterSupport GetFsr4AdapterSupport() const;
 	/** @brief True if the active adapter qualifies for the one-shot runtime-FSR4 migration. */
 	bool IsRuntimeFsr4AutoEligible() const;

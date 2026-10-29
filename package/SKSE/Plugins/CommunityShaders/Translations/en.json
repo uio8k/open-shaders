@@ -3691,7 +3691,6 @@
     "feature.upscaling.frame_limit_vrr": "Limit FPS to display refresh rate",
     "feature.upscaling.fsr4_active_path": "Active path",
     "feature.upscaling.fsr4_failed_fallback": "Runtime FSR4 failed this session -- using FSR3 fallback.",
-    "feature.upscaling.fsr4_runtime_enable": "Use Runtime FSR4",
     "feature.upscaling.fsr4_runtime_failed_fallback": "Runtime upscaler DLL failed this session -- using host FSR3 SDK.",
     "feature.upscaling.fsr_frame_gen_fixed_multiplier": "AMD FSR Frame Generation: Fixed 2x",
     "feature.upscaling.key_feature_1": "DLSS (Deep Learning Super Sampling) support",
