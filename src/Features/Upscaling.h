@@ -62,17 +62,17 @@ public:
 		kDLSSG
 	};
 
-		enum class UpscaleMethod
-		{
-			kNONE,
-			kTAA,
-			kFSR,
-			kDLSS,
-			// Runtime FSR 4.1.2 provider; GetUpscaleMethod() normalizes it to kFSR for
-			// the resource/dispatch paths and IsRuntimeFsr4MethodSelected() carries the
-			// distinction to the runtime upscaler.
-			kFSR4
-		};
+	enum class UpscaleMethod
+	{
+		kNONE,
+		kTAA,
+		kFSR,
+		kDLSS,
+		// Runtime FSR 4.1.2 provider; GetUpscaleMethod() normalizes it to kFSR for
+		// the resource/dispatch paths and IsRuntimeFsr4MethodSelected() carries the
+		// distinction to the runtime upscaler.
+		kFSR4
+	};
 
 	// Upscale preset indexed by numeric value: lower values (Quality) mean higher internal
 	// render resolution; higher values (Ultra Performance) upscale more. Matches FfxFsr3QualityMode.
