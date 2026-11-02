@@ -35,6 +35,13 @@ jobs:
             - name: Check for orphaned keys
               run: python tools/extract-i18n.py --orphans
 
+            - name: Report translation coverage
+              id: coverage
+              continue-on-error: true
+              run: |
+                  python tools/i18n-coverage.py
+                  python tools/i18n-coverage.py --locale zh_CN --check
+
             - name: Check translation file key order matches en.json
               id: sort_i18n
               continue-on-error: true

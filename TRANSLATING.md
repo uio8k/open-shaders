@@ -102,6 +102,13 @@ The `pr-i18n.yaml` workflow checks:
 -   Translation files have valid JSON format
 -   Placeholders `{name}` are consistent across languages
 
+### Checking Coverage
+
+`python tools/i18n-coverage.py` prints every locale's missing and empty key
+count; `--locale zh_CN --check` exits non-zero unless that locale is complete.
+An empty string counts as untranslated, because `I18n::Get()` falls back to
+English for it.
+
 ### Translation Key Ordering
 
 All non-English translation files must have their keys ordered to match `en.json`. This ensures consistency and makes diffs easier to review.
