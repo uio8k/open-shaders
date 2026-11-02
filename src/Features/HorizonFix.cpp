@@ -4,7 +4,8 @@
 
 void HorizonFix::DrawSettings()
 {
-	ImGui::TextWrapped("This feature provides compatibility with the Horizon Fix SKSE plugin, which extends the water far clip plane to allow water to be rendered beyond the vanilla far clip distance. With Exponential Height Fog enabled, the sky is fogged out to the far water's horizon so the two meet without a seam. This feature is only active when the Horizon Fix plugin is installed.");
+	ImGui::TextWrapped("%s", T("feature.horizon_fix.description",
+		"This feature provides compatibility with the Horizon Fix SKSE plugin, which extends the water far clip plane to allow water to be rendered beyond the vanilla far clip distance. With Exponential Height Fog enabled, the sky is fogged out to the far water's horizon so the two meet without a seam. This feature is only active when the Horizon Fix plugin is installed."));
 }
 
 void HorizonFix::PostPostLoad()

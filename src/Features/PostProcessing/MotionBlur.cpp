@@ -134,7 +134,7 @@ void MotionBlur::SaveSettings(json& j)
 
 void MotionBlur::DrawSettings()
 {
-	ImGui::Text("Motion Blur Settings");
+	ImGui::Text("%s", T("feature.post_processing.motion_blur.settings", "Motion Blur Settings"));
 
 	// Motion scale presets
 	const char* presets[] = {

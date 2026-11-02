@@ -135,17 +135,17 @@ void Wind::DrawWindFieldSettings()
 	ImGui::Text("%s: %.5f", T(TKEY("wind_field_travel_distance"), "Accumulated travel distance"), windFieldGustTravelDistance);
 	ImGui::Text("%s: %.3f units/s", T(TKEY("wind_field_advection_speed"), "Gust advection speed"), windFieldAdvectionSpeed);
 	ImGui::Text("%s: %.5f", T(TKEY("wind_field_global_time"), "Global timer"), globals::state->timer);
-	ImGui::Text("Current field: direction (%.3f, %.3f), travel %.1f", windFieldCurrent.direction.x,
+	ImGui::Text(T(TKEY("wind_field_current_field"), "Current field: direction (%.3f, %.3f), travel %.1f"), windFieldCurrent.direction.x,
 		windFieldCurrent.direction.y, windFieldCurrent.travelDistance);
 	if (windFieldTransitionActive) {
-		ImGui::Text("Previous field: direction (%.3f, %.3f), travel %.1f", windFieldTransition.direction.x,
+		ImGui::Text(T(TKEY("wind_field_previous_field"), "Previous field: direction (%.3f, %.3f), travel %.1f"), windFieldTransition.direction.x,
 			windFieldTransition.direction.y, windFieldTransition.travelDistance);
-		ImGui::Text("Transition: %.0f%%", windFieldTransitionBlend * 100.0f);
+		ImGui::Text(T(TKEY("wind_field_transition"), "Transition: %.0f%%"), windFieldTransitionBlend * 100.0f);
 	}
 	if (sky)
-		ImGui::Text("%s: speed %.5f, angle %.5f", T(TKEY("wind_field_sky_input"), "Sky wind input"), sky->windSpeed, sky->windAngle);
+		ImGui::Text(T(TKEY("wind_field_sky_input_values"), "%s: speed %.5f, angle %.5f"), T(TKEY("wind_field_sky_input"), "Sky wind input"), sky->windSpeed, sky->windAngle);
 	if (weather)
-		ImGui::Text("%s: %.3f (raw %u), direction raw %u", T(TKEY("wind_field_weather_input"), "Weather input"),
+		ImGui::Text(T(TKEY("wind_field_weather_input_values"), "%s: %.3f (raw %u), direction raw %u"), T(TKEY("wind_field_weather_input"), "Weather input"),
 			static_cast<unsigned>(weather->data.windSpeed) / 255.0f, static_cast<unsigned>(weather->data.windSpeed),
 			static_cast<unsigned>(weather->data.windDirection));
 	const float selectedSpeed = windFieldSelectedSpeed;
@@ -162,7 +162,7 @@ void Wind::DrawWindFieldSettings()
 		ambientWindVelocity.z * ambientWindVelocity.z);
 	float localWindSpeed = windFieldSelectedSpeed;
 	float ambientGust = 0.0f;
-	ImGui::Text("%s: speed %.5f, direction (%.5f, %.5f, 0.00000)",
+	ImGui::Text(T(TKEY("wind_field_selected_input_values"), "%s: speed %.5f, direction (%.5f, %.5f, 0.00000)"),
 		T(TKEY("wind_field_selected_input"), "Selected sampler input"), selectedSpeed, selectedDirectionX, selectedDirectionY);
 	ImGui::TextWrapped("%s", T(TKEY("wind_field_color_note"),
 								 "The debug color represents normalized ambient gust pressure. Advection controls transport independently from gust amplitude."));
@@ -180,10 +180,10 @@ void Wind::DrawWindFieldSettings()
 			selectedSample.velocity.y * selectedSample.velocity.y +
 			selectedSample.velocity.z * selectedSample.velocity.z);
 		ambientGust = selectedSample.ambientGust;
-		ImGui::Text("%s: (%.5f, %.5f, %.5f), gust %.5f",
+		ImGui::Text(T(TKEY("wind_field_cpu_sample_values"), "%s: (%.5f, %.5f, %.5f), gust %.5f"),
 			T(TKEY("wind_field_cpu_sample"), "CPU sample at camera"), eyeSample.velocity.x, eyeSample.velocity.y,
 			eyeSample.velocity.z, eyeSample.ambientGust);
-		ImGui::Text("%s: (%.5f, %.5f, %.5f), gust %.5f",
+		ImGui::Text(T(TKEY("wind_field_selected_sample_values"), "%s: (%.5f, %.5f, %.5f), gust %.5f"),
 			T(TKEY("wind_field_selected_sample"), "Selected sample at camera"), selectedSample.velocity.x,
 			selectedSample.velocity.y, selectedSample.velocity.z, selectedSample.ambientGust);
 	}
@@ -265,14 +265,14 @@ void Wind::DrawWindFieldSettings()
 			ImGui::TextUnformatted(T(TKEY("wind_field_gust_amplitude_tooltip"),
 				"Fractional velocity deviation around the mean; 0.35 produces a 0.65x to 1.35x range."));
 		const auto& tuning = windFieldTuning;
-		ImGui::Text("Base advection %.2f units/s at wind speed 1.0, front aspect %.2f",
+		ImGui::Text(T(TKEY("wind_field_base_advection"), "Base advection %.2f units/s at wind speed 1.0, front aspect %.2f"),
 			tuning.gustAdvectionBaseSpeed, tuning.frontAspectRatio);
-		ImGui::Text("Detail ratios %.3f / %.3f, turbulence %.3f, skew %.3f", tuning.detailScaleRatio,
+		ImGui::Text(T(TKEY("wind_field_detail_ratios"), "Detail ratios %.3f / %.3f, turbulence %.3f, skew %.3f"), tuning.detailScaleRatio,
 			tuning.detailCrosswindScaleRatio, tuning.turbulenceStrength, tuning.turbulenceSkew);
-		ImGui::Text("Contrast %.3f - %.3f", tuning.contrastLow, tuning.contrastHigh);
-		ImGui::Text("Seeds: broad 0x%08X, detail 0x%08X, mix 0x%08X", tuning.broadGustSeed,
+		ImGui::Text(T(TKEY("wind_field_contrast"), "Contrast %.3f - %.3f"), tuning.contrastLow, tuning.contrastHigh);
+		ImGui::Text(T(TKEY("wind_field_seeds"), "Seeds: broad 0x%08X, detail 0x%08X, mix 0x%08X"), tuning.broadGustSeed,
 			tuning.turbulentGustSeed, tuning.gradientSeedMix);
-		ImGui::Text("PCG: multiplier %u, increment %u", tuning.pcgMultiplier, tuning.pcgIncrement);
+		ImGui::Text(T(TKEY("wind_field_pcg"), "PCG: multiplier %u, increment %u"), tuning.pcgMultiplier, tuning.pcgIncrement);
 		ImGui::TreePop();
 	}
 	ImGui::Separator();

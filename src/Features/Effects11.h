@@ -14,7 +14,7 @@ struct Effects11 : Feature
 public:
 	virtual inline std::string GetName() override { return "Effects11"; }
 	virtual inline std::string GetShortName() override { return "Effects11"; }
-	virtual inline std::string GetDisplayName() override { return "Effects 11"; }
+	virtual inline std::string GetDisplayName() override { return T("feature.effects11.name", "Effects 11"); }
 	virtual std::string_view GetCategory() const override { return FeatureCategories::kPostProcessing; }
 	virtual inline std::string_view GetShaderDefineName() override { return "EFFECTS11"; }
 	virtual inline bool HasShaderDefine(RE::BSShader::Type) override { return true; }

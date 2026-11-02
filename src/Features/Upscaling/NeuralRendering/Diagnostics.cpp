@@ -12,6 +12,8 @@
 #include <iomanip>
 #include <limits>
 
+#define I18N_KEY_PREFIX "feature.upscaling.neural_rendering.diag."
+
 namespace NR
 {
 	namespace
@@ -392,35 +394,35 @@ namespace NR
 				options = selected;
 			}
 		};
-		ImGui::SeparatorText("History and motion");
-		toggle("Apply inferred camera-cut resets", ApplyCameraCuts);
+		ImGui::SeparatorText(T(TKEY("history_and_motion"), "History and motion"));
+		toggle(T(TKEY("apply_inferred_camera_cut_resets"), "Apply inferred camera-cut resets"), ApplyCameraCuts);
 		if (selected & ApplyCameraCuts)
-			toggle("Ignore inferred camera-position resets", IgnorePosition);
-		toggle("Reset history every frame", ForceReset);
-		toggle("Send zero motion vectors (stationary test)", ZeroMotion);
-		toggle("Send DLSS-dilated motion vectors", DilateMotion);
-		toggle("Send zero jitter", ZeroJitter);
-		toggle("Send historical camera parameters", FeedCameraData);
-		toggle("Serialize GPU (slow diagnostic)", SerializeGPU);
-		ImGui::SeparatorText("Skip stages");
-		toggle("Skip writeback (still evaluates)", BypassWriteback);
-		toggle("Skip evaluation entirely", BypassEvaluation);
-		toggle("Output the NR input unchanged", CopyInputToOutput);
-		toggle("DX11 -> DX12 -> DX11 round trip only", InteropRoundTrip);
-		ImGui::SeparatorText("Guide mask (the NGX mask input)");
-		toggle("Do not send the guide mask", BypassMask);
-		toggle("Guide mask all 0", ForceMaskZero);
-		toggle("Guide mask all 1", ForceMaskOne);
-		toggle("Show the guide mask", VisualizeMask);
-		toggle("Show the skin mask input", VisualizeSkinMask);
-		toggle("Show the auto mask input", VisualizeAutoMask);
-		ImGui::SeparatorText("Disable stages");
-		toggle("Disable local tone", DisableTone);
-		toggle("Disable local structure", DisableStructure);
-		toggle("Disable skin processing", DisableSkin);
-		toggle("Disable exposure adaptation", DisableExposure);
-		toggle("Disable color transform", DisableColorTransform);
-		ImGui::SeparatorText("Colour and composition");
+			toggle(T(TKEY("ignore_inferred_camera_position_resets"), "Ignore inferred camera-position resets"), IgnorePosition);
+		toggle(T(TKEY("reset_history_every_frame"), "Reset history every frame"), ForceReset);
+		toggle(T(TKEY("send_zero_motion_vectors"), "Send zero motion vectors (stationary test)"), ZeroMotion);
+		toggle(T(TKEY("send_dlss_dilated_motion_vectors"), "Send DLSS-dilated motion vectors"), DilateMotion);
+		toggle(T(TKEY("send_zero_jitter"), "Send zero jitter"), ZeroJitter);
+		toggle(T(TKEY("send_historical_camera_parameters"), "Send historical camera parameters"), FeedCameraData);
+		toggle(T(TKEY("serialize_gpu"), "Serialize GPU (slow diagnostic)"), SerializeGPU);
+		ImGui::SeparatorText(T(TKEY("skip_stages"), "Skip stages"));
+		toggle(T(TKEY("skip_writeback"), "Skip writeback (still evaluates)"), BypassWriteback);
+		toggle(T(TKEY("skip_evaluation_entirely"), "Skip evaluation entirely"), BypassEvaluation);
+		toggle(T(TKEY("output_nr_input_unchanged"), "Output the NR input unchanged"), CopyInputToOutput);
+		toggle(T(TKEY("dx11_dx12_round_trip_only"), "DX11 -> DX12 -> DX11 round trip only"), InteropRoundTrip);
+		ImGui::SeparatorText(T(TKEY("guide_mask"), "Guide mask (the NGX mask input)"));
+		toggle(T(TKEY("do_not_send_guide_mask"), "Do not send the guide mask"), BypassMask);
+		toggle(T(TKEY("guide_mask_all_0"), "Guide mask all 0"), ForceMaskZero);
+		toggle(T(TKEY("guide_mask_all_1"), "Guide mask all 1"), ForceMaskOne);
+		toggle(T(TKEY("show_guide_mask"), "Show the guide mask"), VisualizeMask);
+		toggle(T(TKEY("show_skin_mask_input"), "Show the skin mask input"), VisualizeSkinMask);
+		toggle(T(TKEY("show_auto_mask_input"), "Show the auto mask input"), VisualizeAutoMask);
+		ImGui::SeparatorText(T(TKEY("disable_stages"), "Disable stages"));
+		toggle(T(TKEY("disable_local_tone"), "Disable local tone"), DisableTone);
+		toggle(T(TKEY("disable_local_structure"), "Disable local structure"), DisableStructure);
+		toggle(T(TKEY("disable_skin_processing"), "Disable skin processing"), DisableSkin);
+		toggle(T(TKEY("disable_exposure_adaptation"), "Disable exposure adaptation"), DisableExposure);
+		toggle(T(TKEY("disable_color_transform"), "Disable color transform"), DisableColorTransform);
+		ImGui::SeparatorText(T(TKEY("colour_and_composition"), "Colour and composition"));
 		uint32_t conversion = conversionMode.load(), exposure = exposureMode.load(), composition = compositeMode.load(), view = visualMode.load();
 		float exposureValue = manualExposure.load(), differenceValue = differenceStrength.load(), split = splitPosition.load();
 		float shadowValue = shadowProtect.load(), highlightValue = highlightProtect.load(), toneRadiusValue = toneRadius.load();
@@ -428,30 +430,30 @@ namespace NR
 		constexpr auto lastExposure = static_cast<uint32_t>(magic_enum::enum_count<ExposureMode>() - 1);
 		constexpr auto lastComposite = static_cast<uint32_t>(magic_enum::enum_count<CompositeMode>() - 1);
 		constexpr auto lastVisual = static_cast<uint32_t>(magic_enum::enum_count<VisualMode>() - 1);
-		if (ImGui::Combo("Color conversion", reinterpret_cast<int*>(&conversion), "Raw / none\0Linear -> sRGB\0sRGB -> Linear\0Linear -> Gamma 2.2\0Gamma 2.2 -> Linear\0sRGB -> Gamma 2.2\0Skyrim Gamma -> Gamma 2.2\0Linear -> Skyrim Gamma\0Linear -> Linear\0Production\0"))
+		if (ImGui::Combo(T(TKEY("color_conversion"), "Color conversion"), reinterpret_cast<int*>(&conversion), "Raw / none\0Linear -> sRGB\0sRGB -> Linear\0Linear -> Gamma 2.2\0Gamma 2.2 -> Linear\0sRGB -> Gamma 2.2\0Skyrim Gamma -> Gamma 2.2\0Linear -> Skyrim Gamma\0Linear -> Linear\0Production\0"))
 			conversionMode = std::min(conversion, lastConversion);
-		if (ImGui::Combo("Exposure mode", reinterpret_cast<int*>(&exposure), "Production\0Ignore\0Force 1.0\0Game exposure\0Manual\0De-expose/re-expose\0Pass only\0Do not pass\0"))
+		if (ImGui::Combo(T(TKEY("exposure_mode"), "Exposure mode"), reinterpret_cast<int*>(&exposure), "Production\0Ignore\0Force 1.0\0Game exposure\0Manual\0De-expose/re-expose\0Pass only\0Do not pass\0"))
 			exposureMode = std::min(exposure, lastExposure);
-		if (ImGui::SliderFloat("Manual exposure", &exposureValue, 0.01f, 16.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp))
+		if (ImGui::SliderFloat(T(TKEY("manual_exposure"), "Manual exposure"), &exposureValue, 0.01f, 16.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp))
 			manualExposure = exposureValue;
-		if (ImGui::Combo("Composition mode", reinterpret_cast<int*>(&composition),
+		if (ImGui::Combo(T(TKEY("composition_mode"), "Composition mode"), reinterpret_cast<int*>(&composition),
 				"Production\0Raw replacement\0Masked lerp\0"
 				"50% masked lerp\0Preserve luminance\0Preserve ratio\0Residual\0Ratio\0"))
 			compositeMode = std::min(composition, lastComposite);
-		ImGui::SeparatorText("Debug views");
-		if (ImGui::Combo("Debug view", reinterpret_cast<int*>(&view), "None\0NR input\0NR output\0Difference\0Ratio\0Original\0Post-composite\0Luminance difference\0Chroma difference\0Guide mask\0Exposure\0Split original / NR output\0Split original / composite\0Split NR input / output\0Split pre / post\0Log luminance ratio\0Tone delta\0Tone low\0Tone high\0Tone low gain\0Final luminance ratio\0Material category\0"))
+		ImGui::SeparatorText(T(TKEY("debug_views"), "Debug views"));
+		if (ImGui::Combo(T(TKEY("debug_view"), "Debug view"), reinterpret_cast<int*>(&view), "None\0NR input\0NR output\0Difference\0Ratio\0Original\0Post-composite\0Luminance difference\0Chroma difference\0Guide mask\0Exposure\0Split original / NR output\0Split original / composite\0Split NR input / output\0Split pre / post\0Log luminance ratio\0Tone delta\0Tone low\0Tone high\0Tone low gain\0Final luminance ratio\0Material category\0"))
 			visualMode = std::min(view, lastVisual);
-		if (ImGui::SliderFloat("Difference strength", &differenceValue, 1.0f, 16.0f, "%.0fx", ImGuiSliderFlags_AlwaysClamp))
+		if (ImGui::SliderFloat(T(TKEY("difference_strength"), "Difference strength"), &differenceValue, 1.0f, 16.0f, "%.0fx", ImGuiSliderFlags_AlwaysClamp))
 			differenceStrength = differenceValue;
-		if (ImGui::SliderFloat("Split position", &split, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp))
+		if (ImGui::SliderFloat(T(TKEY("split_position"), "Split position"), &split, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp))
 			splitPosition = split;
-		if (ImGui::SliderFloat("Shadow protect", &shadowValue, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp))
+		if (ImGui::SliderFloat(T(TKEY("shadow_protect"), "Shadow protect"), &shadowValue, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp))
 			shadowProtect = shadowValue;
-		if (ImGui::SliderFloat("Highlight protect", &highlightValue, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp))
+		if (ImGui::SliderFloat(T(TKEY("highlight_protect"), "Highlight protect"), &highlightValue, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp))
 			highlightProtect = highlightValue;
-		if (ImGui::SliderFloat("Local tone radius", &toneRadiusValue, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp))
+		if (ImGui::SliderFloat(T(TKEY("local_tone_radius"), "Local tone radius"), &toneRadiusValue, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp))
 			toneRadius = toneRadiusValue;
-		if (ImGui::Button("Restore Diagnostic Defaults")) {
+		if (ImGui::Button(T(TKEY("restore_diagnostic_defaults"), "Restore Diagnostic Defaults"))) {
 			options = 0;
 			conversionMode = static_cast<uint32_t>(ColorConversion::Production);
 			exposureMode = static_cast<uint32_t>(ExposureMode::Production);
@@ -464,9 +466,9 @@ namespace NR
 			highlightProtect = kHighlightProtect;
 			toneRadius = kToneRadius;
 		}
-		if (ImGui::Button("Run All NR Tests"))
+		if (ImGui::Button(T(TKEY("run_all_tests"), "Run All NR Tests")))
 			startSuite = true;
-		ImGui::TextWrapped("%zu tests, %u world frames each. Repeat standing still, turning and walking; watch the overlay. The sequence pauses while this menu is open.",
+		ImGui::TextWrapped(T(TKEY("suite_summary"), "%zu tests, %u world frames each. Repeat standing still, turning and walking; watch the overlay. The sequence pauses while this menu is open."),
 			kSuiteOptions.size(), kSuiteFrames);
 	}
 
@@ -475,22 +477,22 @@ namespace NR
 		if (!DeveloperMode())
 			return;
 		std::scoped_lock lock(mutex);
-		ImGui::TextWrapped("Session-only isolation tests. Inferred camera cuts are diagnostic-only; loading, frame-gap and resource resets remain active. Option changes reset history once.");
+		ImGui::TextWrapped(T(TKEY("session_only_isolation_tests"), "Session-only isolation tests. Inferred camera cuts are diagnostic-only; loading, frame-gap and resource resets remain active. Option changes reset history once."));
 		{
 			Util::DisableGuard disableSuite(suite);
 			DrawSuiteOptions();
 		}
-		if (suite && ImGui::Button("Stop Tests and Restore"))
+		if (suite && ImGui::Button(T(TKEY("stop_tests_and_restore"), "Stop Tests and Restore")))
 			stopSuite = true;
 		if (!tracePath.empty()) {
-			ImGui::TextWrapped("Trace: %s", tracePath.c_str());
-			if (ImGui::Button("Copy Trace Path"))
+			ImGui::TextWrapped(T(TKEY("trace"), "Trace: %s"), tracePath.c_str());
+			if (ImGui::Button(T(TKEY("copy_trace_path"), "Copy Trace Path")))
 				ImGui::SetClipboardText(tracePath.c_str());
 		}
 		bool overlayVisible = showOverlay.load(std::memory_order_relaxed);
-		if (ImGui::Checkbox("Show NR Diagnostics", &overlayVisible))
+		if (ImGui::Checkbox(T(TKEY("show_nr_diagnostics"), "Show NR Diagnostics"), &overlayVisible))
 			showOverlay.store(overlayVisible, std::memory_order_relaxed);
-		ImGui::TextWrapped("Scheduling diagnostics are CPU observations, not proof of GPU pixels. Traces use [NRDiag/v2] in OpenShaders.log.");
+		ImGui::TextWrapped(T(TKEY("scheduling_diagnostics_note"), "Scheduling diagnostics are CPU observations, not proof of GPU pixels. Traces use [NRDiag/v2] in OpenShaders.log."));
 	}
 
 	void Diagnostics::DrawOverlay(const std::string& status)
@@ -553,3 +555,5 @@ namespace NR
 		ImGui::End();
 	}
 }
+
+#undef I18N_KEY_PREFIX

@@ -452,8 +452,8 @@ void LightLimitFix::DrawOverlay()
 	if (vizOn) {
 		if (mode == 2) {
 			uint32_t cx = clusterSize[0], cy = clusterSize[1], cz = clusterSize[2];
-			ImGui::Text("Cluster grid       : %ux%ux%u  (%u total)", cx, cy, cz, cx * cy * cz);
-			ImGui::Text("Max lights/cluster : %u", CLUSTER_MAX_LIGHTS);
+			ImGui::Text(T("feature.light_limit_fix.cluster_grid", "Cluster grid       : %ux%ux%u  (%u total)"), cx, cy, cz, cx * cy * cz);
+			ImGui::Text(T("feature.light_limit_fix.max_lights_per_cluster", "Max lights/cluster : %u"), CLUSTER_MAX_LIGHTS);
 		} else if (mode >= 3) {
 			ShadowCasterManager::DrawOverlayShadowModeInfo(mode, shadowUnshadowedLightCount, lightCount);
 		}

@@ -307,13 +307,13 @@ void AdvancedSettingsRenderer::RenderShaderThreading()
 
 	// Persisted in Menu::Settings (not ShaderCache); applied to backgroundCompilation at boot in Menu::Load.
 	auto& menuSettings = globals::menu->GetSettings();
-	ImGui::Checkbox("Background Compile on Boot", &menuSettings.BackgroundShaderCompilationOnBoot);
+	ImGui::Checkbox(T("menu.advanced.background_compile_on_boot", "Background Compile on Boot"), &menuSettings.BackgroundShaderCompilationOnBoot);
 	if (auto _tt = Util::HoverTooltipWrapper()) {
-		ImGui::TextUnformatted(
+		ImGui::TextUnformatted(T("menu.advanced.background_compile_on_boot_tooltip",
 			"Load the menu immediately and compile shaders as rendering requests them, "
 			"instead of precompiling every permutation (same as the Skip Compilation key). "
 			"Required feature setup still runs; shader jobs already started finish normally. "
-			"Takes effect on the next launch. Default off.");
+			"Takes effect on the next launch. Default off."));
 	}
 
 	if (globals::game::isVR) {
