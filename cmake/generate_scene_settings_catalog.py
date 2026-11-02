@@ -431,10 +431,24 @@ def collect_nlohmann_macros(paths: list[Path]) -> dict[str, list[str]]:
     return macros
 
 
+def enclosing_namespace(text: str, position: int, spans: list[tuple[int, int, str]]) -> str:
+    return "::".join(name for start, end, name in spans if start < position < end)
+
+
+def collect_namespace_spans(text: str) -> list[tuple[int, int, str]]:
+    spans = []
+    for match in re.finditer(r"\bnamespace\s+([A-Za-z_]\w*(?:::[A-Za-z_]\w*)*)\s*\{", text):
+        end = find_matching_brace(text, match.end() - 1)
+        if end >= 0:
+            spans.append((match.start(), end, match.group(1)))
+    return spans
+
+
 def collect_struct_bodies(paths: list[Path]) -> dict[str, str]:
     bodies: dict[str, str] = {}
     for path in paths:
         text = read_text(path)
+        namespace_spans = collect_namespace_spans(text)
         for match in re.finditer(STRUCT_DECL_RE, text):
             name = match.group(1)
             body_start = match.end()
@@ -459,6 +473,9 @@ def collect_struct_bodies(paths: list[Path]) -> dict[str, str]:
                     depth -= 1
                     if depth == 0:
                         bodies.setdefault(name, text[body_start:i])
+                        namespace = enclosing_namespace(text, match.start(), namespace_spans)
+                        if namespace:
+                            bodies.setdefault(f"{namespace}::{name}", text[body_start:i])
                         break
                 i += 1
     return bodies
@@ -474,9 +491,14 @@ def clean_type(type_name: str) -> str:
 def parse_struct_fields(body: str) -> dict[str, str]:
     fields: dict[str, str] = {}
     for raw_stmt in mask_cpp_source(body).split(";"):
-        parsed = parse_field_statement(raw_stmt)
+        declarators = split_args(raw_stmt) if "," in raw_stmt and "<" not in raw_stmt else [raw_stmt]
+        parsed = parse_field_statement(declarators[0])
         if parsed:
             fields[parsed[0]] = parsed[1]
+            for declarator in declarators[1:]:
+                extra = re.fullmatch(r"\s*([A-Za-z_]\w*)\s*(?:=.*)?", declarator, re.DOTALL)
+                if extra:
+                    fields.setdefault(extra.group(1), parsed[1])
     return fields
 
 
@@ -2608,6 +2630,46 @@ def resolve_provider_combo_choices(
     return [(index, label, key) for index, (label, key) in enumerate(values)]
 
 
+def resolve_value_table_combo_choices(
+        source: str,
+        items_expression: str,
+        values_expression: str,
+        prefix: str,
+        constants: dict[str, float]) -> list[tuple[int, str, str]]:
+    labels = re.fullmatch(r"([A-Za-z_]\w*)(?:\.data\(\))?", items_expression.strip())
+    values = re.fullmatch(r"[A-Za-z_]\w*", values_expression.strip())
+    if not labels or not values:
+        return []
+    string_arrays, integer_arrays = collect_literal_std_arrays(source, prefix, constants)
+    names = string_arrays.get(labels.group(1))
+    numbers = integer_arrays.get(values.group(0))
+    if not names or not numbers or len(names) != len(numbers):
+        return []
+    return [(number, label, key) for number, (label, key) in zip(numbers, names)]
+
+
+def resolve_combo_call_choices(
+        body: str,
+        position: int,
+        args: list[str],
+        prefix: str,
+        source: str,
+        constants: dict[str, float],
+        providers: dict[str, tuple[tuple[str, str], ...]]) -> list[tuple[int, str, str]]:
+    """Choices of a Combo call, whether its labels are a local array, a provider's array or a label and value table."""
+    values = resolve_combo_choices(body, position, args[2], prefix, source, constants)
+    if not values and len(args) >= 4:
+        values = resolve_provider_combo_choices(
+            body, position, args[2], args[3], providers, constants)
+    if not values and len(args) == 3:
+        alias = args[2].strip()
+        values = resolve_provider_combo_choices(
+            body, position, f"{alias}.data()", f"{alias}.size()", providers, constants)
+    if not values and len(args) >= 5:
+        values = resolve_value_table_combo_choices(source, args[2], args[3], prefix, constants)
+    return values
+
+
 def resolve_choice_label_call(
         source: str,
         expression: str,
@@ -2658,7 +2720,8 @@ def resolve_combo_choices(
     if not re.fullmatch(r"[A-Za-z_]\w*", variable):
         return []
     declaration = list(re.finditer(
-        rf"\b(?:const\s+)?char\s*\*\s*(?:const\s+)?{re.escape(variable)}\s*\[[^\]]*\]\s*=\s*\{{",
+        rf"\b(?:const\s+)?(?:char\s*\*\s*(?:const\s+)?{re.escape(variable)}\s*\[[^\]]*\]\s*="
+        rf"|std::array\s*<[^;{{}}]*>\s*{re.escape(variable)}\s*=?)\s*\{{",
         body[:position]))
     if not declaration:
         return []
@@ -2667,7 +2730,11 @@ def resolve_combo_choices(
     if close_brace < 0:
         return []
 
-    items = [item for item in split_args(body[open_brace + 1:close_brace]) if item.strip()]
+    initializer = body[open_brace + 1:close_brace]
+    inner = initializer.strip()
+    if inner.startswith("{") and find_matching_brace(inner, 0) == len(inner) - 1:
+        initializer = inner[1:-1]
+    items = [item for item in split_args(initializer) if item.strip()]
     choices = []
     for index, item in enumerate(items):
         translated = extract_i18n_call(item, prefix)
@@ -3545,14 +3612,9 @@ def _project_standard_controls(
 
     def resolve_choices(function, position, kind, args):
         if kind == "Combo" and len(args) >= 3:
-            values = resolve_combo_choices(
-                function.body, position, args[2], function.prefix,
-                text_by_path[function.source], constants_by_path[function.source])
-            if not values and len(args) >= 4:
-                values = resolve_provider_combo_choices(
-                    function.body, position, args[2], args[3], providers,
-                    constants_by_path[function.source])
-            return tuple(values)
+            return tuple(resolve_combo_call_choices(
+                function.body, position, args, function.prefix,
+                text_by_path[function.source], constants_by_path[function.source], providers))
         if kind == "RadioButton" and len(args) >= 3:
             value = resolve_numeric_expression(args[2], constants_by_path[function.source])
             label = _localized_text(args[0], function.prefix)
@@ -4312,6 +4374,128 @@ def collect_navigation_controls(paths: list[Path]) -> dict[str, tuple[tuple[str,
     return {owner: tuple(sorted(labels)) for owner, labels in controls.items()}
 
 
+DISABLED_TOGGLE_RE = re.compile(r"\bImGui::(BeginDisabled|EndDisabled)\s*\(")
+MEMBER_REFERENCE_RE = re.compile(r"(?:\.|->)\s*([A-Za-z_]\w*)")
+CHAIN_REFERENCE_RE = re.compile(r"[A-Za-z_]\w*(?:\s*(?:\.|->)\s*[A-Za-z_]\w*)+")
+CONDITION_CHAIN = r"[A-Za-z_]\w*(?:(?:\.|->)\s*[A-Za-z_]\w*)*"
+
+
+def feature_control_sources(feature: dict[str, str]) -> list[Path]:
+    header = Path(feature["source"])
+    candidates = [header.with_suffix(".cpp")]
+    directory = header.with_suffix("")
+    if directory.is_dir():
+        candidates.extend(sorted(directory.rglob("*.cpp")))
+    return [path for path in dict.fromkeys(candidates) if path.exists()]
+
+
+def collect_disabled_regions(
+        masked: str) -> tuple[list[tuple[int, int, int, str]], list[tuple[int, int]]]:
+    """Returns (regions, condition spans): regions as (body start, body end, depth, condition)."""
+    stack: list[tuple[int, str, int]] = []
+    regions: list[tuple[int, int, int, str]] = []
+    condition_spans: list[tuple[int, int]] = []
+    for match in DISABLED_TOGGLE_RE.finditer(masked):
+        open_paren = match.end() - 1
+        close = find_matching_paren(masked, open_paren)
+        if close < 0:
+            continue
+        if match.group(1) == "BeginDisabled":
+            condition_spans.append((open_paren, close + 1))
+            stack.append((close + 1, masked[open_paren + 1:close], len(stack)))
+        elif stack:
+            start, condition, depth = stack.pop()
+            regions.append((start, match.start(), depth, condition))
+    return regions, condition_spans
+
+
+def resolve_disabled_condition(condition: str) -> tuple[tuple[str, ...], int] | None:
+    """Returns (member chain, required value) for a plain on/off condition over one setting, or None."""
+    expression = condition.strip()
+    if not expression or any(operator in expression for operator in ("&&", "||", "(", ")", "?", ":")):
+        return None
+    negated = re.fullmatch(rf"!\s*({CONDITION_CHAIN})", expression)
+    required_on = re.fullmatch(rf"({CONDITION_CHAIN})\s*==\s*(?:0|false)", expression)
+    required_off = re.fullmatch(rf"({CONDITION_CHAIN})\s*!=\s*0", expression)
+    chain = (
+        negated.group(1) if negated else
+        required_on.group(1) if required_on else
+        required_off.group(1) if required_off else
+        expression if re.fullmatch(CONDITION_CHAIN, expression) else "")
+    if not chain:
+        return None
+    return tuple(re.findall(r"[A-Za-z_]\w*", chain)), 1 if (negated or required_on) else 0
+
+
+def control_member_chain(entry: dict[str, object]) -> tuple[str, ...]:
+    """Lists the C++ members a catalogued control writes through its access expression."""
+    members = [member for member in re.findall(r"[A-Za-z_]\w*", str(entry["access"])) if member != "settings"]
+    while members and members[-1] in VECTOR_COMPONENT_NAMES:
+        members.pop()
+    return tuple(members)
+
+
+def chains_match(reference: tuple[str, ...], control: tuple[str, ...]) -> bool:
+    """True when a referenced access chain names the control's member, ignoring a leading object or alias."""
+    if not reference or not control:
+        return False
+    if len(reference) > len(control):
+        return reference[-len(control):] == control
+    return control[-(len(reference) - 1):] == reference[1:] if len(reference) > 1 else control[-1:] == reference
+
+
+def assign_enabled_by(entries: list[dict[str, object]], features: dict[str, dict[str, str]]):
+    """Fills enabledByKey/Path/Value from the ImGui::BeginDisabled region each control is drawn in."""
+    by_feature: dict[str, list[dict[str, object]]] = {}
+    for entry in entries:
+        by_feature.setdefault(str(entry["featureClass"]), []).append(entry)
+    for feature_class, feature_entries in by_feature.items():
+        feature = features.get(feature_class)
+        if not feature:
+            continue
+        controls = [(chain, entry) for entry in feature_entries if (chain := control_member_chain(entry))]
+        for source in feature_control_sources(feature):
+            masked = mask_cpp_source(read_text(source))
+            regions, condition_spans = collect_disabled_regions(masked)
+            if not regions:
+                continue
+            references: dict[str, list[tuple[tuple[str, ...], int]]] = {}
+            for reference in CHAIN_REFERENCE_RE.finditer(masked):
+                offset = reference.start()
+                if any(start <= offset < end for start, end in condition_spans):
+                    continue
+                members = re.findall(r"[A-Za-z_]\w*", reference.group(0))
+                while len(members) > 1 and members[-1] in VECTOR_COMPONENT_NAMES:
+                    members.pop()
+                references.setdefault(members[-1], []).append((tuple(members), offset))
+            for control_chain, control in controls:
+                best_depth, enabled_by = -1, None
+                for chain, offset in references.get(control_chain[-1], ()):
+                    if not chains_match(chain, control_chain):
+                        continue
+                    enclosing = sorted(
+                        (region for region in regions if region[0] <= offset < region[1]),
+                        key=lambda region: (-region[2], -region[0]))
+                    for _, _, depth, condition in enclosing:
+                        resolved = resolve_disabled_condition(condition)
+                        if resolved:
+                            if depth > best_depth:
+                                best_depth, enabled_by = depth, resolved
+                            break
+                if not enabled_by:
+                    continue
+                prerequisite_entries = [
+                    candidate for chain, candidate in controls if chains_match(enabled_by[0], chain)]
+                if len(prerequisite_entries) != 1:
+                    continue
+                prerequisite = prerequisite_entries[0]
+                if control is prerequisite:
+                    continue
+                control["enabledByKey"] = prerequisite["key"]
+                control["enabledByPath"] = prerequisite["path"]
+                control["enabledByValue"] = enabled_by[1]
+
+
 def build_entries(source_dir: Path) -> list[dict[str, object]]:
     src_paths = list((source_dir / "src").rglob("*.cpp")) + list((source_dir / "src").rglob("*.h"))
     src_paths += [source_dir / "src" / "TruePBR.cpp", source_dir / "src" / "TruePBR.h"]
@@ -4556,6 +4740,9 @@ def build_entries(source_dir: Path) -> list[dict[str, object]]:
             "addressable": context.addressable and
                 access.split(".")[0].split("[")[0] in public_members.get(context.field_class, {}),
             "controlScope": context.control_scope,
+            "enabledByKey": "",
+            "enabledByPath": "",
+            "enabledByValue": -1,
             "virtualControls": virtual_controls,
             "navigationControls": navigation_controls.get(context.feature_class, ()),
         })
@@ -4580,7 +4767,7 @@ def build_entries(source_dir: Path) -> list[dict[str, object]]:
             if owner not in {context.field_class, "Settings"})
         declared_type = catalog_class_aliases.get(context.field_class, {}).get(simple_type, simple_type)
         declared_type = declared_type.split("::")[-1]
-        declared_fields = catalog_class_fields.get(context.field_class, {}).get(
+        declared_fields = struct_fields.get(full_type) or catalog_class_fields.get(context.field_class, {}).get(
             simple_type, struct_fields.get(declared_type, {}))
         for field in fields:
             field_type = declared_fields.get(field, "")
@@ -4847,6 +5034,7 @@ def build_entries(source_dir: Path) -> list[dict[str, object]]:
     if discovery_errors:
         raise ValueError("scene settings catalog discovery failed: " + "; ".join(sorted(set(discovery_errors))))
 
+    assign_enabled_by(entries, features)
     entries.sort(key=lambda e: (e["feature"], e["displayPath"], e["displayName"], e["path"], e["key"]))
     return entries
 
@@ -4982,6 +5170,9 @@ namespace SceneSettingsCatalog
 \t\tconst ChoiceMetadata* choices;
 \t\tstd::size_t choiceCount;
 \t\tstd::string_view controlScope;
+\t\tstd::string_view enabledByKey;
+\t\tstd::string_view enabledByPath;
+\t\tstd::int8_t enabledByValue;
 \t};
 
 \tstruct VirtualAggregateControlMetadata
@@ -5057,7 +5248,8 @@ namespace SceneSettingsCatalog
             f'{str(e.get("clampNumericInput", False)).lower()}, '
             f'{str(e.get("hdrColor", False)).lower()}, '
             f'{str(e["invertedDisplay"]).lower()}, '
-            f'{choice_pointer}, {choice_count}, "{cpp_escape(e.get("controlScope", ""))}" }},'
+            f'{choice_pointer}, {choice_count}, "{cpp_escape(e.get("controlScope", ""))}", '
+            f'"{cpp_escape(e["enabledByKey"])}", "{cpp_escape(e["enabledByPath"])}", {e["enabledByValue"]} }},'
         )
     joined_rows = "\n".join(rows)
     joined_choice_arrays = "\n".join(choice_arrays)

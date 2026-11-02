@@ -4,7 +4,6 @@
 #include "Upscaling/DX12SwapChain.h"
 #include "Upscaling/FidelityFX.h"
 #include "Upscaling/FoveatedRender.h"
-#include "Upscaling/Fsr4Support.h"
 #include "Upscaling/NeuralRendering.h"
 #include "Upscaling/PerfMode.h"
 #include "Upscaling/RCAS/RCAS.h"
@@ -62,17 +61,13 @@ public:
 		kDLSSG
 	};
 
-		enum class UpscaleMethod
-		{
-			kNONE,
-			kTAA,
-			kFSR,
-			kDLSS,
-			// Runtime FSR 4.1.2 provider; GetUpscaleMethod() normalizes it to kFSR for
-			// the resource/dispatch paths and IsRuntimeFsr4MethodSelected() carries the
-			// distinction to the runtime upscaler.
-			kFSR4
-		};
+	enum class UpscaleMethod
+	{
+		kNONE,
+		kTAA,
+		kFSR,
+		kDLSS
+	};
 
 	// Upscale preset indexed by numeric value: lower values (Quality) mean higher internal
 	// render resolution; higher values (Ultra Performance) upscale more. Matches FfxFsr3QualityMode.
@@ -85,7 +80,7 @@ public:
 		kUltraPerformance = 4,
 	};
 
-	static constexpr uint32_t kFsr4RuntimeSelectionSchemaVersion = Fsr4::kRuntimeSelectionSchemaVersion;
+	static constexpr uint32_t kFsr4RuntimeSelectionSchemaVersion = 2;
 
 	struct Settings
 	{
@@ -124,9 +119,7 @@ public:
 		// Boot-locked; the preset is inert while set. DLSS clamps into NGX range.
 		float vrRenderScale = 0.0f;
 
-		// Tracks whether the FSR4 method selection has been auto-migrated for the detected
-		// adapter. Defaults to current so a fresh config needs no migration; LoadSettings resets
-		// it to 0 when absent from JSON so pre-existing configs run the migration once.
+		bool fsr4RuntimeEnable = true;
 		uint32_t fsr4RuntimeSelectionSchemaVersion = kFsr4RuntimeSelectionSchemaVersion;
 	};
 
@@ -152,12 +145,13 @@ public:
 		UTIL_RESTART_FIELD(Settings, upscaleMethod, "Upscaling Method"),
 		UTIL_RESTART_FIELD(Settings, qualityMode, "Upscale Preset"),
 		UTIL_RESTART_FIELD(Settings, vrRenderScale, "VR Render Scale"),
+		// CreateUpscalingTextureResources (which allocates runtimeFsrDepthTexture)
+		// only runs on an upscale-method change, not on this toggle -- restart-gate
+		// it so a mid-session flip can't select the runtime provider without ever
+		// allocating the texture Upscale() then dereferences.
+		UTIL_RESTART_FIELD(Settings, fsr4RuntimeEnable, "Use runtime upscaler upgrade"),
 	} };
 	Util::Settings::BootSnapshot<Settings> bootSnapshot{ kRestartFields };
-
-	// Transient migration input: the pre-schema-3 "Use Runtime FSR4" toggle captured from
-	// JSON in LoadSettings, consumed once by ApplyLegacyFsr4RuntimeSelectionMigration.
-	bool legacyFsr4RuntimeEnable = false;
 
 	struct JitterCB
 	{
@@ -297,9 +291,6 @@ public:
 	PostProcessingInput GetPostProcessingInput() const override;
 
 	UpscaleMethod GetUpscaleMethod() const;
-	/** @brief True when the selected method (slot/PerfMode/boot semantics as GetUpscaleMethod)
-	 * is kFSR4, i.e. the runtime FSR 4.1.2 provider should be requested. */
-	bool IsRuntimeFsr4MethodSelected() const;
 	FrameGenMethod GetFrameGenMethod() const;
 	bool UsesDLSSGFrameGen() const;
 

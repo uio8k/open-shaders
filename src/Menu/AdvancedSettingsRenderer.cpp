@@ -310,9 +310,10 @@ void AdvancedSettingsRenderer::RenderShaderThreading()
 	ImGui::Checkbox("Background Compile on Boot", &menuSettings.BackgroundShaderCompilationOnBoot);
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::TextUnformatted(
-			"Load the menu immediately and compile shaders in the background on boot "
-			"(same as the Skip Compilation key). Shaders still compile - only the startup wait "
-			"is skipped. Takes effect on the next launch. Default off.");
+			"Load the menu immediately and compile shaders as rendering requests them, "
+			"instead of precompiling every permutation (same as the Skip Compilation key). "
+			"Required feature setup still runs; shader jobs already started finish normally. "
+			"Takes effect on the next launch. Default off.");
 	}
 
 	if (globals::game::isVR) {
@@ -1131,10 +1132,6 @@ void AdvancedSettingsRenderer::RenderTestingSection()
 	}
 
 	ImGui::Spacing();
-
-	// A/B Testing settings
-	auto* abTestingManager = ABTestingManager::GetSingleton();
-	abTestingManager->DrawSettingsUI();
 
 	// Developer Mode Testing UI + scene-prep button (previously on the "Developer" tab)
 	if (globals::state->IsDeveloperMode()) {

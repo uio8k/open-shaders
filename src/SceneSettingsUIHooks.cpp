@@ -1,6 +1,7 @@
 #include "SceneSettingsUIHooks.h"
 
 #include "Feature.h"
+#include "Features/PerformanceOverlay/ABTesting/ABTesting.h"
 #include "I18n/I18n.h"
 #include "SceneSettingsCatalog.generated.h"
 #include "SceneSettingsManager.h"
@@ -8,6 +9,7 @@
 #include "Utils/SettingsDefaults.h"
 #include "Utils/UI.h"
 
+#include <fmt/format.h>
 #include <imgui_internal.h>
 
 #include <limits>
@@ -111,6 +113,9 @@ namespace
 	thread_local Feature* g_currentFeature = nullptr;
 	thread_local bool g_sceneSettingsActive = false;
 	thread_local bool g_featureSceneEditing = false;
+
+	constexpr const char* kDisabledBenchmarkPopup = "##benchmark_disabled_setting";
+
 	using BlockedFeatureSceneEditSettings =
 		std::unordered_set<const SceneSettingsCatalog::SettingMetadata*>;
 	using LogicalControlKey = std::tuple<std::string_view, std::string_view, std::string_view,
@@ -311,20 +316,27 @@ namespace
 		return !IsFeatureSceneEditSetting(setting);
 	}
 
+	bool IsQueuedForBenchmark(const SceneSettingsCatalog::SettingMetadata& setting)
+	{
+		return ABTestingManager::GetSingleton()->IsQueued(ABTestingManager::SettingKey(setting));
+	}
+
 	bool ShouldOutlineSetting(const SceneSettingsCatalog::SettingMetadata& setting)
 	{
-		return g_featureSceneEditing && g_cachedAlteredFeatureSceneEditSettings.contains(&setting);
+		return (g_featureSceneEditing && g_cachedAlteredFeatureSceneEditSettings.contains(&setting)) || IsQueuedForBenchmark(setting);
 	}
 
 	struct SettingOutlineGuard
 	{
 		bool outlined;
+		bool queued;
 		explicit SettingOutlineGuard(const SceneSettingsCatalog::SettingMetadata* setting) :
-			outlined(setting && ShouldOutlineSetting(*setting))
+			outlined(setting && ShouldOutlineSetting(*setting)),
+			queued(setting && IsQueuedForBenchmark(*setting))
 		{
 			if (!outlined)
 				return;
-			ImGui::PushStyleColor(ImGuiCol_Border, ImGui::GetStyleColorVec4(ImGuiCol_HeaderActive));
+			ImGui::PushStyleColor(ImGuiCol_Border, queued ? Menu::GetSingleton()->GetTheme().StatusPalette.InfoColor : ImGui::GetStyleColorVec4(ImGuiCol_HeaderActive));
 			ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, std::max(ImGui::GetStyle().FrameBorderSize, Util::GetUIScale()));
 		}
 		~SettingOutlineGuard()
@@ -458,6 +470,15 @@ namespace
 		return settingAddress ? settingAddress : valueAddress;
 	}
 
+	/** @brief Looks a control up for the benchmark outline alone, since FindControlSetting returns nothing outside scene-settings mode. */
+	const SceneSettingsCatalog::SettingMetadata* FindQueuedSetting(const void* valueAddress)
+	{
+		if (!g_currentFeature || ABTestingManager::GetSingleton()->GetQueue().empty())
+			return nullptr;
+		const auto* setting = SceneSettingsCatalog::FindSettingForControl(g_currentFeature, GetControlStorageAddress(valueAddress));
+		return setting && IsQueuedForBenchmark(*setting) ? setting : nullptr;
+	}
+
 	const SceneSettingsCatalog::SettingMetadata* FindControlSetting(
 		const char* label, const void* valueAddress, bool choiceLabelsOnly = false, bool* metadataMatched = nullptr)
 	{
@@ -534,9 +555,151 @@ namespace
 		return {};
 	}
 
+	/** @brief Offers to open the Benchmark tab while any comparison is queued. */
+	void DrawGoToBenchmarkMenuItem()
+	{
+		const size_t queued = ABTestingManager::GetSingleton()->GetQueue().size();
+		if (queued == 0)
+			return;
+		const auto label = fmt::format(fmt::runtime(T("menu.settings.benchmark_go", "Go to benchmark ({})")), queued);
+		if (!ImGui::MenuItem(label.c_str()))
+			return;
+		auto* menu = Menu::GetSingleton();
+		menu->SelectFeatureMenu("Performance");
+		menu->RequestTab("BenchmarkTab");
+	}
+
+	/**
+	 * @brief Offers to queue the setting's unsaved change as a benchmark comparison, turning on the settings that
+	 * disable it; a queued setting offers removal.
+	 * @param prerequisites The settings that must be turned on first, or nullopt when they cannot be resolved.
+	 */
+	void DrawBenchmarkMenuItem(const SceneSettingsCatalog::SettingMetadata& setting, const json& currentValue,
+		const std::optional<std::vector<ABSettingPrerequisite>>& prerequisites)
+	{
+		auto* manager = ABTestingManager::GetSingleton();
+		const auto key = ABTestingManager::SettingKey(setting);
+		if (manager->IsQueued(key)) {
+			if (ImGui::MenuItem(T("menu.settings.benchmark_remove", "Remove from benchmark")))
+				manager->Unqueue(key);
+			return;
+		}
+
+		static std::string savedValueKey;
+		static std::optional<json> savedValue;
+		static std::string restartReason;
+		const bool refresh = ImGui::IsWindowAppearing() || savedValueKey != key;
+		if (refresh) {
+			savedValueKey = key;
+			savedValue = manager->SavedSettingValue(*g_currentFeature, setting);
+		}
+
+		const auto formatValue = [&setting](const json& value) {
+			auto text = FormatSettingValue(setting, value);
+			return text.empty() ? value.dump() : text;
+		};
+		const char* addPrefix = T("menu.settings.benchmark_change", "Add to benchmark:");
+
+		if (!savedValue || *savedValue == currentValue) {
+			ImGui::MenuItem(T("menu.settings.benchmark_unchanged", "Add to benchmark (change this setting first)"), nullptr, false, false);
+			if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+				ImGui::SetTooltip("%s", T("menu.settings.benchmark_unchanged_tooltip",
+											"Change this setting first, then add it. The benchmark compares it against its saved value."));
+			return;
+		}
+
+		const auto from = *savedValue;
+		const auto valueText = formatValue(from) + " -> " + formatValue(currentValue);
+		auto variantLabel = Util::Settings::GetCatalogLeafDisplayName(setting) + ": " + valueText;
+		auto addLabel = std::string(addPrefix) + " " + valueText;
+		if (refresh)
+			restartReason = manager->SettingRestartReason(*g_currentFeature, setting, currentValue, savedValue);
+
+		if (!restartReason.empty()) {
+			addLabel += std::string(" ") + T("menu.settings.benchmark_restart", "(requires restart)");
+			ImGui::MenuItem(addLabel.c_str(), nullptr, false, false);
+			if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+				ImGui::SetTooltip("%s",
+					fmt::format(fmt::runtime(T("menu.settings.benchmark_restart_tooltip",
+									"Cannot be measured live: {} needs a restart to apply this, and the benchmark queue does not survive a restart.")),
+						restartReason)
+						.c_str());
+			return;
+		}
+		if (!prerequisites) {
+			addLabel += std::string(" ") + T("menu.settings.benchmark_blocked", "(disabled by another setting)");
+			ImGui::MenuItem(addLabel.c_str(), nullptr, false, false);
+			if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+				ImGui::SetTooltip("%s", T("menu.settings.benchmark_blocked_tooltip",
+											"This setting is disabled by another setting that benchmarking cannot turn on automatically. Turn it on yourself, then add this one; the benchmark compares against your current settings."));
+			return;
+		}
+		if (!prerequisites->empty()) {
+			std::string names;
+			for (const auto& prerequisite : *prerequisites)
+				names += (names.empty() ? "" : ", ") + Util::Settings::GetCatalogLeafDisplayName(*prerequisite.setting);
+			addLabel += " " + fmt::format(fmt::runtime(T("menu.settings.benchmark_prereq", "(turns on {})")), names);
+		}
+		if (!ImGui::MenuItem(addLabel.c_str()))
+			return;
+
+		std::string error;
+		if (!manager->QueueSettingChange(*g_currentFeature, setting, from, currentValue, variantLabel, &error))
+			logger::warn("[A/B] {}", error);
+	}
+
+	/**
+	 * @brief Right-click menu for a control another setting disables: ImGui never reports a disabled item as
+	 * hovered, so the popup has to be opened by hand. Such a control offers the benchmark alone.
+	 */
+	void DrawDisabledBenchmarkMenu(const void* valueAddress)
+	{
+		if ((ImGui::GetCurrentContext()->LastItemData.ItemFlags & ImGuiItemFlags_Disabled) == 0)
+			return;
+		if (ABTestingManager::GetSingleton()->IsEnabled())
+			return;
+		ImGui::PushID(valueAddress);
+		const SKSE::stl::scope_exit popControlId([]() noexcept { ImGui::PopID(); });
+		if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && ImGui::IsMouseReleased(ImGuiMouseButton_Right))
+			ImGui::OpenPopup(kDisabledBenchmarkPopup);
+		if (!ImGui::BeginPopup(kDisabledBenchmarkPopup))
+			return;
+
+		const auto* setting = SceneSettingsCatalog::FindSettingForControl(g_currentFeature, GetControlStorageAddress(valueAddress));
+		json current;
+		const json* currentValue = nullptr;
+		if (setting) {
+			g_currentFeature->SaveSettings(current);
+			currentValue = Util::Settings::GetCatalogSerializedValue(current, *setting);
+		}
+		if (!currentValue) {
+			ImGui::CloseCurrentPopup();
+			ImGui::EndPopup();
+			return;
+		}
+
+		static std::string prerequisitesKey;
+		static std::optional<std::vector<ABSettingPrerequisite>> prerequisites;
+		if (ImGui::IsWindowAppearing() || prerequisitesKey != ABTestingManager::SettingKey(*setting)) {
+			prerequisitesKey = ABTestingManager::SettingKey(*setting);
+			prerequisites = ABTestingManager::GetSingleton()->PrerequisitesFor(*g_currentFeature, *setting);
+			if (setting->enabledByValue < 0)
+				prerequisites.reset();
+		}
+		DrawBenchmarkMenuItem(*setting, *currentValue, prerequisites);
+		DrawGoToBenchmarkMenuItem();
+		ImGui::EndPopup();
+	}
+
 	bool DrawResetToDefaultMenu(const void* valueAddress)
 	{
-		if (!g_currentFeature || g_featureSceneEditing || !ImGui::BeginPopupContextItem())
+		if (!g_currentFeature || g_featureSceneEditing)
+			return false;
+		if ((ImGui::GetCurrentContext()->LastItemData.ItemFlags & ImGuiItemFlags_Disabled) != 0) {
+			DrawDisabledBenchmarkMenu(valueAddress);
+			return false;
+		}
+		if (!ImGui::BeginPopupContextItem())
 			return false;
 
 		const auto* setting = SceneSettingsCatalog::FindSettingForControl(g_currentFeature, GetControlStorageAddress(valueAddress));
@@ -561,6 +724,10 @@ namespace
 		                   Util::Settings::ResetSettingToDefault(*g_currentFeature, *setting);
 		if (reset)
 			g_featureSettingMutation = true;
+		else if (!ABTestingManager::GetSingleton()->IsEnabled() && currentValue) {
+			DrawBenchmarkMenuItem(*setting, *currentValue, std::vector<ABSettingPrerequisite>{});
+			DrawGoToBenchmarkMenuItem();
+		}
 		ImGui::EndPopup();
 		return reset;
 	}
@@ -573,7 +740,7 @@ namespace
 		ClearControlledItem();
 		bool metadataMatched = false;
 		const auto* setting = FindControlSetting(label, valueAddress, false, &metadataMatched);
-		SettingOutlineGuard outline(setting);
+		SettingOutlineGuard outline(setting ? setting : FindQueuedSetting(valueAddress));
 		if (setting ? !ShouldBlockSetting(*setting) : !g_featureSceneEditing || metadataMatched) {
 			ControlDetourScope detourScope;
 			const bool changed = TrackFeatureSettingMutation(draw());

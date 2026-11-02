@@ -34,7 +34,7 @@ option(
 project(
     # gersemi: ignore
     CommunityShaders
-    VERSION 2.19.0
+    VERSION 2.20.0
     LANGUAGES CXX
 )
 

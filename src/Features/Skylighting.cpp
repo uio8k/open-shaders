@@ -167,9 +167,7 @@ void Skylighting::DrawSettings()
 			T(TKEY("probe_grid_medium"), "192 x 192 x 96"),
 			T(TKEY("probe_grid_high"), "256 x 256 x 128")
 		};
-		int selectedGrid = static_cast<int>(settings.ProbeGridQuality);
-		if (ImGui::Combo(T(TKEY("probe_grid"), "Probe Grid"), &selectedGrid, gridNames, 3))
-			settings.ProbeGridQuality = static_cast<uint>(selectedGrid);
+		Util::Combo(T(TKEY("probe_grid"), "Probe Grid"), &settings.ProbeGridQuality, gridNames);
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::Text("%s", T(TKEY("probe_grid_tooltip"), "Smaller grids reduce update work and memory use but lower spatial detail. Changing the grid rebuilds probe history."));
 
@@ -869,9 +867,8 @@ void Skylighting::RenderOcclusion()
 
 	auto& precipitationTarget = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPRECIPITATION_OCCLUSION_MAP];
 	const RE::BSGraphics::DepthStencilData originalTarget = precipitationTarget;
-	static float& precipitationCubeSize = *reinterpret_cast<float*>(REL::RelocationID(515451, 401590).address());
+	static float& precipitationCubeSize = RE::Precipitation::GetCubeSize();
 	static RE::NiPoint3& precipitationDirection = *reinterpret_cast<RE::NiPoint3*>(REL::RelocationID(515509, 401648).address());
-	static REL::Relocation<void(RE::Precipitation*, RE::NiPointer<RE::NiCamera>)> computeProjection{ REL::RelocationID(25643, 26185) };
 	const float originalCubeSize = precipitationCubeSize;
 	const float originalLastCubeSize = precipitation->lastCubeSize;
 	const RE::NiPoint3 originalDirection = precipitationDirection;
@@ -889,7 +886,7 @@ void Skylighting::RenderOcclusion()
 		precipitationTarget = originalTarget;
 		if (projectionChanged) {
 			ZoneScopedN("Skylighting - Restore Projection");
-			computeProjection(precipitation, precipitation->occlusionData.camera);
+			precipitation->UpdateProjection(precipitation->occlusionData.camera);
 		}
 	});
 
@@ -922,7 +919,7 @@ void Skylighting::RenderOcclusion()
 
 	{
 		ZoneScopedN("Skylighting - Setup Projection");
-		computeProjection(precipitation, precipitation->occlusionData.camera);
+		precipitation->UpdateProjection(precipitation->occlusionData.camera);
 		projectionChanged = true;
 		precipitation->SetupMask();
 	}

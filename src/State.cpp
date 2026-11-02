@@ -138,7 +138,6 @@ void State::UpdatePermutationBuffer()
 	permutationData.TreeLeafBaseWindFlutterGain = windContribution.treeLeafBaseWindFlutterGain;
 	permutationData.EnableAmbientGrassWind = windContribution.enableAmbientGrassWind;
 	permutationData.GrassWindSensitivity = windContribution.grassWindSensitivity;
-	permutationData.GrassWindBendProfile = windContribution.grassWindBendProfile;
 	permutationData.GrassWindCompressionToBend = windContribution.grassWindCompressionToBend;
 	permutationData.GrassWindFlutterStrength = windContribution.grassWindFlutterStrength;
 	permutationData.GrassWindFlutterFrequency = windContribution.grassWindFlutterFrequency;
@@ -1198,12 +1197,12 @@ void State::SetupResources()
 
 	auto renderer = globals::game::renderer;
 
-	permutationCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<PermutationCB>());
-	sharedDataCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<SharedDataCB>());
+	permutationCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<PermutationCB>(), "State::PermutationCB");
+	sharedDataCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<SharedDataCB>(), "State::SharedDataCB");
 
 	auto [data, size] = GetFeatureBufferData(false);
 	(void)data;
-	featureDataCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc((uint32_t)size));
+	featureDataCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc((uint32_t)size), "State::FeatureDataCB");
 
 	// Grab main texture to get resolution
 	// VR cannot use viewport->screenWidth/Height as it's the desktop preview window's resolution and not HMD

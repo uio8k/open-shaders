@@ -72,6 +72,7 @@ add_executable(cpp_tests
     test_isl_radiusmath.cpp
     test_shadowcaster_math.cpp
     test_lodshadow_update_budget.cpp
+    test_gpupassnames.cpp
     test_atlas_allocator.cpp
     test_mathutils.cpp
     test_snowcover_math.cpp
@@ -110,6 +111,9 @@ add_executable(cpp_tests
 	test_nr_eye_mode.cpp
 	test_nr_context_profile.cpp
 	test_nr_roi.cpp
+	test_abcompositorstats.cpp
+	test_abcomparison.cpp
+	test_prerequisitechain.cpp
 	test_desktop_mirror.cpp
 	test_furshellassetscan.cpp
 	test_furinertiaspring.cpp
@@ -117,7 +121,7 @@ add_executable(cpp_tests
 	test_bound_points.cpp
 	test_region_overlay.cpp
 	test_tablabel.cpp
-	test_fsr4support.cpp
+	test_control_value.cpp
     # Stub I18n::Get so units-under-test that call T() (Subrect's DrawEditor)
     # link without pulling the translation loader into the test binary.
     i18n_stub.cpp
@@ -126,6 +130,8 @@ add_executable(cpp_tests
     "${CMAKE_SOURCE_DIR}/src/Utils/Subrect.cpp"
     "${CMAKE_SOURCE_DIR}/src/Utils/RegionOverlay.cpp"
     "${CMAKE_SOURCE_DIR}/src/Utils/SphericalHarmonics.cpp"
+    "${CMAKE_SOURCE_DIR}/src/Features/PerformanceOverlay/ABTesting/ABCompositorStats.cpp"
+    "${CMAKE_SOURCE_DIR}/src/Features/PerformanceOverlay/ABTesting/ABComparison.cpp"
     "${CMAKE_SOURCE_DIR}/src/Menu/DesktopMirrorDrawData.cpp"
 	"${CMAKE_SOURCE_DIR}/src/Utils/HdrPngMetadata.cpp"
 	"${CMAKE_SOURCE_DIR}/src/Utils/SehGuard.cpp"

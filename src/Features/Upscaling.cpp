@@ -33,7 +33,7 @@
 
 namespace NR
 {
-	NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Tuning, intensity, localToneStrength, localStructureStrength, skinStructureStrength,
+	NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(NR::Tuning, intensity, localToneStrength, localStructureStrength, skinStructureStrength,
 		skinToneStrength, hairToneStrength, eyeToneStrength, foliageToneStrength, landscapeToneStrength,
 		style, useAutoMask, regionOfInterest, regionOverlay, regionFit, regionGroup, regionFollowFoveation,
 		parallelEyes, allowUnverifiedRuntime, runtimeVariant, materialStrength, strengthSkin, strengthHair, strengthEyes, strengthFoliage, strengthLandscape, strengthCloth, strengthMetal,
@@ -43,8 +43,8 @@ namespace NR
 
 namespace NR::Context
 {
-	NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(ContextProfile, run, scope, region);
-	NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Profiles, normal, dialogue);
+	NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(NR::Context::ContextProfile, run, scope, region);
+	NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(NR::Context::Profiles, normal, dialogue);
 }
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
@@ -73,38 +73,10 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	reflexFPSLimit,
 	renderAtUpscaleRes,
 	vrRenderScale,
+	fsr4RuntimeEnable,
 	fsr4RuntimeSelectionSchemaVersion);
 
 decltype(&D3D11CreateDeviceAndSwapChain) ptrD3D11CreateDeviceAndSwapChainUpscaling;
-
-/**
- * @brief One-shot migration of the FSR4 selection to the upscale-method dropdown for the detected adapter.
- *
- * Schema 3 replaced the fsr4RuntimeEnable toggle with the kFSR4 method value: a blob that had the
- * toggle on keeps runtime FSR4 by promoting its FSR method to kFSR4, and fresh blobs follow the
- * RX 6000 auto-enable rule (RX 7000 only for never-migrated configs, preserving a user's off choice).
- */
-void ApplyLegacyFsr4RuntimeSelectionMigration(Upscaling& a_upscaling, FidelityFX::Fsr4AdapterSupport a_adapterSupport)
-{
-	auto& settings = a_upscaling.settings;
-	if (settings.fsr4RuntimeSelectionSchemaVersion >= Upscaling::kFsr4RuntimeSelectionSchemaVersion)
-		return;
-
-	if (a_adapterSupport == FidelityFX::Fsr4AdapterSupport::Unsupported)
-		return;
-
-	if (Fsr4::ShouldPromoteMethodToFsr4(a_adapterSupport, settings.fsr4RuntimeSelectionSchemaVersion, a_upscaling.legacyFsr4RuntimeEnable)) {
-		uint32_t* activeSlot = Upscaling::streamline.featureDLSS ?
-		                           &settings.upscaleMethod :
-		                           &settings.upscaleMethodNoDLSS;
-		if (*activeSlot == static_cast<uint32_t>(Upscaling::UpscaleMethod::kFSR)) {
-			*activeSlot = static_cast<uint32_t>(Upscaling::UpscaleMethod::kFSR4);
-			logger::info("[Upscaling] Promoted upscale method to FSR4 for detected {} adapter", magic_enum::enum_name(a_adapterSupport));
-		}
-	}
-
-	settings.fsr4RuntimeSelectionSchemaVersion = Upscaling::kFsr4RuntimeSelectionSchemaVersion;
-}
 
 /**
  * @brief Creates a Direct3D 11 device and swap chain, with support for advanced upscaling and frame generation features.
@@ -132,7 +104,6 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChainUpscaling(
 	DXGI_ADAPTER_DESC adapterDesc{};
 	if (pAdapter && SUCCEEDED(pAdapter->GetDesc(&adapterDesc))) {
 		globals::state->SetAdapterDescription(adapterDesc.Description);
-		ApplyLegacyFsr4RuntimeSelectionMigration(upscaling, FidelityFX::GetFsr4AdapterSupport(adapterDesc));
 	}
 
 	upscaling.LoadUpscalingSDKs();
@@ -672,6 +643,22 @@ void Upscaling::RegisterUxActions()
 				logger::warn("[FOVEATED] applyFoveationPreset preset {} not found; not applied", json(name).dump());
 		});
 
+	FEATURE_QUERY("runtimeUpgradeStatus",
+		"Runtime upscaler capability and actual dispatch status: available, confirmedProvider, selected, enabledAtBoot, lastFramePath, contextProvider, and unavailableReason. Availability requires a device query and successful context creation; lastFramePath stays pending until dispatch. Change fsr4RuntimeEnable through openshaders.feature and restart to apply the selection.",
+		([](const Feature* self, const json&) -> json {
+			const auto& upscaling = *static_cast<const Upscaling*>(self);
+			const auto& runtime = upscaling.fidelityFX;
+			return json{
+				{ "available", runtime.IsRuntimeUpgradeAvailable() },
+				{ "confirmedProvider", runtime.GetRuntimeUpgradeProviderName() },
+				{ "selected", upscaling.settings.fsr4RuntimeEnable },
+				{ "enabledAtBoot", upscaling.bootSnapshot.Boot(&Settings::fsr4RuntimeEnable) },
+				{ "lastFramePath", runtime.GetRuntimeUpscalerLastFramePathLabel() },
+				{ "contextProvider", runtime.GetRuntimeUpscalerProviderName() },
+				{ "unavailableReason", runtime.GetRuntimeUpgradeUnavailableReason() }
+			};
+		}));
+
 	FEATURE_QUERY("neuralRenderingStatus",
 		"Neural Rendering state: the status line the settings panel shows, the failure latch, the accepted nvngx_dlssnr.dll version, render size and eyes, per-eye NGX result codes, and how many frames it has applied. context is which situation profile is in effect right now (normal or dialogue), dialogueOnly reports whether the normal profile is suspended (settings.neuralRenderingContexts.normal.run false), and dialogueOpen whether the dialogue menu is open right now, so a state of kSuspended is explained by dialogueOnly on with dialogueOpen false. Each situation has a profile at settings.neuralRenderingContexts.normal and settings.neuralRenderingContexts.dialogue with run (false suspends the pass), scope (0 same as normal, 1 everything, 2 skin hair and eyes, 3 skin hair eyes and foliage) overriding the material scope, and region (0 same as normal, 1 full frame) dropping the tracked-actor crop. Also the verdict for the runtime on disk as runtimeAvailability (Ready, Missing, UnsupportedVersion or UnvalidatedBuild), the version it found in runtimeVersion, why it was refused in runtimeDetail, and whether the pass would load it right now in runtimeLoadable -- developer mode loads a refused build outside a missing file. The material strength is reported as materialStrength (the saved switch at settings.neuralRenderingTuning.materialStrength), materialStrengthAvailable (the deferred material lane is present and the graded protection has not been rejected or degraded), materialStrengthActive (it was bound on the last evaluate), materialStrengthValues (the active strengths in NeuralRenderingCategory id order: None, Skin, Hair, Eyes, Foliage, Landscape, Cloth, Metal) and materialEdgeSoftness (the active edge-softness radius in pixels). Those strengths come from settings.neuralRenderingTuning.strengthSkin, strengthHair, strengthEyes, strengthFoliage, strengthLandscape, strengthCloth, strengthMetal and strengthOther, each 0 to 1, and the radius from strengthEdgeSoftness, 0 to 4 pixels. The material map debug view is settings.neuralRenderingTuning.showMaterialMap (reported here as showMaterialMap), with materialMapMode 0 for category colours or 1 for the strength ramp, and materialMapFilter a bitmask of the categories it draws (bit 0 None, 1 Skin, 2 Hair, 3 Eyes, 4 Foliage, 5 Landscape, 6 Cloth, 7 Metal; the low eight bits only, all on by default). allowUnverifiedRuntime (default false, settings.neuralRenderingTuning.allowUnverifiedRuntime) loads a 310.8.x or 310.9.x nvngx_dlssnr.dll outside the pinned builds (state UnvalidatedBuild) without developer mode; its output is unverified. settings.neuralRenderingTuning.runtimeVariant (empty by default) names a subfolder of the Streamline directory whose nvngx_dlssnr.dll to load instead of the one in the folder itself; changing it unloads the running runtime and loads the other, runtimeBuilds lists the default file and each subfolder build with its version and verdict (variant, version, availability, selected), and runtimeVersion, runtimeAvailability and runtimeDetail describe the selected build. settings.neuralRenderingTuning.modelPreset (0 the original 310.8 network, the default; 1 the newest, faster network a 310.9 runtime ships; ignored by a 310.8 runtime) is reported as modelPreset and recreates the model when changed. parallelEyes (default true, VR only) evaluates the second eye on a second compute queue; it falls back to one queue by itself. The crop NR last evaluated is reported in openshaders.feature diagnostics as neuralRegion and neuralActorBounds, with which sources chose it in neuralRegionSource (none, actor, fovea or both). Eye-staggered gain reuse is settings.neuralRenderingTuning.skipFrameReuse (VR only, off by default, on in the Performance profile), reported here as skipFrameReuse, with skipFrameReuseActive true only while it actually runs (false on flat or while frame generation is active); settings.neuralRenderingTuning.skipFrameGapMode (0 notify the model by doubling its motion, 1 reset the eye's history) is reported as skipFrameGapMode. settings.neuralRenderingTuning.crossEyeGain (default true; with the stagger) lets a reused pixel whose own earlier gain was rejected take the other eye's model gain of the same frame, and is reported as crossEyeGain. eyeReuse is per eye whether this frame reused its stored gain instead of running the model (left then right; both false on flat or with the stagger off), and modelFrames/reuseFrames count eye-evaluations and eye-reuses since startup, so one frame of a running stagger adds one to each. The model scale settings.neuralRenderingTuning.modelScale (0.25 to 1, developer-only, default 1) runs the model below the eye size and upsamples its tone gain onto the eye; modelGuidedUpsample weights that upsample by brightness similarity, and modelScale is reported here. settings.neuralRenderingTuning.sbsEvaluate (developer mode and VR only, off by default) evaluates both eyes as one side-by-side image on a single instance, which takes precedence over the stagger and combines with the model scale. With a model scale or sbsEvaluate on, modelVerify also evaluates each eye alone at full size every frame so a verify capture can compare the two, and mirrorEyes feeds eye 0's inputs to both eyes; both are developer-only measurement aids. Params: none.",
 		NeuralRenderingStatus);
@@ -745,45 +732,33 @@ void Upscaling::DrawUpscalingSettings()
 		T(TKEY("method_none"), "None"),
 		T(TKEY("method_taa"), "TAA")
 	};
-	std::vector<uint32_t> modeValues = {
-		static_cast<uint32_t>(UpscaleMethod::kNONE),
-		static_cast<uint32_t>(UpscaleMethod::kTAA)
-	};
 
-	upscaleModes.push_back("AMD FSR 3.1");
-	modeValues.push_back(static_cast<uint32_t>(UpscaleMethod::kFSR));
+	std::string fsrLabel = "AMD FSR 3.1";
+	upscaleModes.push_back(fsrLabel);
 
-	// Runtime FSR 4.1.2 is its own method on eligible AMD adapters; the host FSR3 SDK
-	// stays the fallback when the runtime DLL is missing or fails mid-session.
-	if (fidelityFX.IsRuntimeFsr4AutoEligible()) {
-		upscaleModes.push_back("FSR4.1.2");
-		modeValues.push_back(static_cast<uint32_t>(UpscaleMethod::kFSR4));
-	}
+	std::string dlssLabel = "NVIDIA DLSS";
+	upscaleModes.push_back(dlssLabel);
 
-	const bool featureDLSS = streamline.featureDLSS;
-	if (featureDLSS) {
-		upscaleModes.push_back("NVIDIA DLSS");
-		modeValues.push_back(static_cast<uint32_t>(UpscaleMethod::kDLSS));
-	}
+	// Determine available modes
+	bool featureDLSS = streamline.featureDLSS;
+	bool featureFSR = true;  // FSR is always available
 
-	uint32_t* currentUpscaleMode = featureDLSS ? &settings.upscaleMethod : &settings.upscaleMethodNoDLSS;
-
-	auto modeIndex = std::find(modeValues.begin(), modeValues.end(), *currentUpscaleMode);
-	if (modeIndex == modeValues.end()) {
-		// Unselectable value (e.g. FSR4 stored after a GPU swap): fall back to the host
-		// FSR3 method, matching GetUpscaleMethod()'s runtime normalization.
-		*currentUpscaleMode = static_cast<uint32_t>(UpscaleMethod::kFSR);
-		modeIndex = std::find(modeValues.begin(), modeValues.end(), *currentUpscaleMode);
-	}
-	int selectedMode = static_cast<int>(modeIndex - modeValues.begin());
+	uint32_t* currentUpscaleMode = &settings.upscaleMethod;
+	uint32_t availableModes = 1;  // Start with TAA
+	if (featureFSR)
+		availableModes = 2;  // Add FSR
+	if (featureDLSS)
+		availableModes = 3;  // Add DLSS if available
+	else
+		currentUpscaleMode = &settings.upscaleMethodNoDLSS;
 
 	// Dropdown for method selection
 	std::vector<const char*> modeLabels;
-	for (const auto& mode : upscaleModes)
-		modeLabels.push_back(mode.c_str());
+	for (uint32_t i = 0; i <= availableModes; ++i)
+		modeLabels.push_back(upscaleModes[i].c_str());
 	if (openCompositeBlocksUpscaling)
 		ImGui::BeginDisabled();
-	ImGui::Combo(T(TKEY("method"), "Method"), &selectedMode, modeLabels.data(), (int)modeLabels.size());
+	Util::Combo(T(TKEY("method"), "Method"), currentUpscaleMode, modeLabels.data(), static_cast<int>(modeLabels.size()));
 	if (openCompositeBlocksUpscaling)
 		ImGui::EndDisabled();
 	if (auto _tt = Util::HoverTooltipWrapper()) {
@@ -793,7 +768,7 @@ void Upscaling::DrawUpscalingSettings()
 			ImGui::TextUnformatted(T(TKEY("method_tooltip"), "Selects the upscaling backend."));
 	}
 
-	*currentUpscaleMode = modeValues[std::clamp(selectedMode, 0, static_cast<int>(modeValues.size()) - 1)];
+	*currentUpscaleMode = std::min(availableModes, *currentUpscaleMode);
 
 	if (openCompositeBlocksUpscaling) {
 		if (openCompositeBlocker.configPath.empty())
@@ -825,14 +800,11 @@ void Upscaling::DrawUpscalingSettings()
 		// that's the one the boot snapshot locked.
 		if (currentUpscaleMode == &settings.upscaleMethod &&
 			bootSnapshot.HasPendingChange(settings, &Settings::upscaleMethod)) {
-			auto labelForValue = [&](uint32_t a_value) {
-				const auto it = std::find(modeValues.begin(), modeValues.end(), a_value);
-				return it != modeValues.end() ? upscaleModes[it - modeValues.begin()] : upscaleModes[2];
-			};
+			const uint live = std::clamp<uint>(settings.upscaleMethod, 0u, availableModes);
+			const uint boot = std::clamp<uint>(bootSnapshot.Boot(&Settings::upscaleMethod), 0u, availableModes);
 			Util::Text::RestartNeeded(
 				"Pending restart: currently active method = %s (selected = %s).",
-				labelForValue(bootSnapshot.Boot(&Settings::upscaleMethod)).c_str(),
-				labelForValue(settings.upscaleMethod).c_str());
+				upscaleModes[boot].c_str(), upscaleModes[live].c_str());
 		}
 
 		if (perfMode.IsDisplaySizeChanged()) {
@@ -882,14 +854,14 @@ void Upscaling::DrawUpscalingSettings()
 
 		if (upscaleMethod == UpscaleMethod::kFSR) {
 			ImGui::SliderFloat(T(TKEY("sharpness"), "Sharpness"), &settings.sharpnessFSR, 0.0f, 1.0f, "%.1f");
-			// FSR4 is selected as its own method; runtime failure falls back to FSR3 and is surfaced here.
-			if (IsRuntimeFsr4MethodSelected()) {
-				ImGui::TextDisabled("%s: %s", T(TKEY("fsr4_active_path"), "Active path"), fidelityFX.GetDisplayedFsrPathLabel().c_str());
-				if (fidelityFX.IsRuntimeFsr4FailureLatched())
-					Util::Text::Warning("%s", T(TKEY("fsr4_failed_fallback"), "Runtime FSR4 failed this session -- using FSR3 fallback."));
-				else if (fidelityFX.IsRuntimeUpscalerFailureLatched())
-					Util::Text::Warning("%s", T(TKEY("fsr4_runtime_failed_fallback"), "Runtime upscaler DLL failed this session -- using host FSR3 SDK."));
+			if (fidelityFX.IsRuntimeUpgradeAvailable()) {
+				ImGui::Checkbox(T(TKEY("runtime_upgrade_enable"), "Use runtime upscaler upgrade"), &settings.fsr4RuntimeEnable);
+				Util::UI::RestartGatedAnnotate(bootSnapshot, settings, &Settings::fsr4RuntimeEnable);
+				ImGui::TextDisabled("%s: %s", T(TKEY("runtime_upgrade_provider"), "Available provider"), fidelityFX.GetRuntimeUpgradeProviderName().c_str());
 			}
+			ImGui::TextDisabled("%s: %s", T(TKEY("fsr4_active_path"), "Active path"), fidelityFX.GetDisplayedFsrPathLabel().c_str());
+			if (!fidelityFX.GetRuntimeUpgradeUnavailableReason().empty())
+				Util::Text::Warning("%s", fidelityFX.GetRuntimeUpgradeUnavailableReason().c_str());
 		} else if (upscaleMethod == UpscaleMethod::kDLSS) {
 			ImGui::Checkbox(T(TKEY("enable_sharpening"), "Enable Sharpening"), &settings.sharpnessEnabledDLSS);
 			if (auto _tt = Util::HoverTooltipWrapper()) {
@@ -908,7 +880,7 @@ void Upscaling::DrawUpscalingSettings()
 				T(TKEY("dlss_model_preset_l"), "Preset L"),
 				T(TKEY("dlss_model_preset_m"), "Preset M")
 			};
-			ImGui::Combo(T(TKEY("dlss_model_preset"), "DLSS Model Preset"), (int*)&settings.presetDLSS, presets, 5);
+			Util::Combo(T(TKEY("dlss_model_preset"), "DLSS Model Preset"), &settings.presetDLSS, presets);
 			if (auto _tt = Util::HoverTooltipWrapper()) {
 				ImGui::Text("%s", T(TKEY("dlss_model_preset_tooltip"),
 									  "Choose which DLSS AI model preset to use.\n"
@@ -1099,10 +1071,7 @@ void Upscaling::DrawBackendDiagnostics()
 	};
 	// streamlineLogLevel is sanitized in LoadSettings (runs on every load,
 	// not gated on this node being expanded), so the stored value is in range.
-	int logLevelIdx = static_cast<int>(settings.streamlineLogLevel);
-	if (ImGui::Combo(T(TKEY("streamline_logging"), "Streamline Logging"), &logLevelIdx, logLevels, IM_ARRAYSIZE(logLevels))) {
-		settings.streamlineLogLevel = static_cast<uint>(logLevelIdx);
-	}
+	Util::Combo(T(TKEY("streamline_logging"), "Streamline Logging"), &settings.streamlineLogLevel, logLevels);
 	Util::UI::RestartGatedAnnotate(bootSnapshot, settings, &Settings::streamlineLogLevel,
 		T(TKEY("streamline_logging_tooltip"),
 			"Verbosity of the NVIDIA Streamline backend logs. Useful for debugging issues with DLSS / "
@@ -1242,20 +1211,18 @@ void Upscaling::LoadSettings(json& o_json)
 		foveatedRender.LoadSettings(o_json["foveatedRender"]);
 		o_json.erase("foveatedRender");
 	}
-	// NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT fills an absent key with
-	// Settings' default member initializer (the CURRENT schema version), not 0 --
-	// detect absence explicitly so a pre-existing config still runs the migration.
-	// The legacy fsr4RuntimeEnable toggle (removed at schema 3) is captured before
-	// deserialization drops it from the struct.
+	// Missing schema fields take the current default during deserialization, so legacy settings need an explicit migration version.
 	const bool hadFsr4SchemaVersion = o_json.contains("fsr4RuntimeSelectionSchemaVersion");
-	legacyFsr4RuntimeEnable = o_json.value("fsr4RuntimeEnable", false);
 	settings = o_json;
 	settings.neuralRenderingTuning.Sanitize();
 	settings.neuralRenderingContexts.Sanitize();
 	neuralRendering.ResetHistory();
 	if (!hadFsr4SchemaVersion)
 		settings.fsr4RuntimeSelectionSchemaVersion = 0;
-	ApplyLegacyFsr4RuntimeSelectionMigration(*this, fidelityFX.GetFsr4AdapterSupport());
+	if (settings.fsr4RuntimeSelectionSchemaVersion < kFsr4RuntimeSelectionSchemaVersion) {
+		settings.fsr4RuntimeEnable = true;
+		settings.fsr4RuntimeSelectionSchemaVersion = kFsr4RuntimeSelectionSchemaVersion;
+	}
 
 	// Sanitize loaded settings to ensure enum indices are valid
 	constexpr auto enumCount = static_cast<uint>(magic_enum::enum_count<UpscaleMethod>());
@@ -1505,43 +1472,18 @@ Upscaling::UpscaleMethod Upscaling::GetUpscaleMethod() const
 	// boot-latched method while DLSS is available; if DLSS drops out (RenderDoc / no-DLSS GPU)
 	// fall to FSR — the only other redirecting method — never a live or non-redirecting choice
 	// that would desync the fixed RT sizing.
-	if (globals::features::upscaling.perfMode.IsHookActive()) {
-		if (!streamline.featureDLSS)
-			return UpscaleMethod::kFSR;
-		const auto boot = static_cast<UpscaleMethod>(bootSnapshot.Boot(&Settings::upscaleMethod));
-		return boot == UpscaleMethod::kFSR4 ? UpscaleMethod::kFSR : boot;
-	}
+	if (globals::features::upscaling.perfMode.IsHookActive())
+		return streamline.featureDLSS ?
+		           static_cast<UpscaleMethod>(bootSnapshot.Boot(&Settings::upscaleMethod)) :
+		           UpscaleMethod::kFSR;
 
 	// No PerfMode: the DLSS-capable preference, or the no-DLSS preference when DLSS is unavailable —
 	// coerced off DLSS so an out-of-range config can't re-select an unresolved DLSS path.
 	if (!streamline.featureDLSS) {
 		const auto noDlss = static_cast<UpscaleMethod>(settings.upscaleMethodNoDLSS);
-		if (noDlss == UpscaleMethod::kDLSS || noDlss == UpscaleMethod::kFSR4)
-			return UpscaleMethod::kFSR;
-		return noDlss;
+		return noDlss == UpscaleMethod::kDLSS ? UpscaleMethod::kFSR : noDlss;
 	}
-	const auto method = static_cast<UpscaleMethod>(settings.upscaleMethod);
-	// FSR4 rides the kFSR resource/dispatch paths; the runtime distinction is carried by
-	// IsRuntimeFsr4MethodSelected() and an unavailable runtime falls back to host FSR3 here.
-	return method == UpscaleMethod::kFSR4 ? UpscaleMethod::kFSR : method;
-}
-
-bool Upscaling::IsRuntimeFsr4MethodSelected() const
-{
-	if (globals::game::isVR && GetOpenCompositeUpscalingBlocker().active)
-		return false;
-
-	if (perfMode.IsHookActive()) {
-		// Same slot semantics as GetUpscaleMethod(): boot-latched while DLSS is
-		// available; the no-DLSS slot is live-read (it is not boot-gated).
-		return streamline.featureDLSS ?
-		           static_cast<UpscaleMethod>(bootSnapshot.Boot(&Settings::upscaleMethod)) == UpscaleMethod::kFSR4 :
-		           static_cast<UpscaleMethod>(settings.upscaleMethodNoDLSS) == UpscaleMethod::kFSR4;
-	}
-
-	if (!streamline.featureDLSS)
-		return static_cast<UpscaleMethod>(settings.upscaleMethodNoDLSS) == UpscaleMethod::kFSR4;
-	return static_cast<UpscaleMethod>(settings.upscaleMethod) == UpscaleMethod::kFSR4;
+	return static_cast<UpscaleMethod>(settings.upscaleMethod);
 }
 
 bool Upscaling::PerfModePrerequisitesMet() const
@@ -2287,6 +2229,9 @@ void Upscaling::SetupResources()
 		return;
 	}
 
+	const auto displaySize = perfMode.IsHookActive() ? perfMode.GetDisplayScreenSize() : globals::state->screenSize;
+	fidelityFX.ProbeRuntimeUpscalerUpgrade(static_cast<uint32_t>(globals::game::isVR ? displaySize.x / 2 : displaySize.x), static_cast<uint32_t>(displaySize.y));
+
 	QueryPerformanceFrequency(&qpf);
 
 	auto renderer = globals::game::renderer;
@@ -2332,12 +2277,13 @@ void Upscaling::SetupResources()
 	}
 
 	DX::ThrowIfFailed(globals::d3d::device->CreateDepthStencilState(&depthStencilDesc, upscaleDepthStencilState.put()));
+	Util::SetResourceName(upscaleDepthStencilState.get(), "Upscaling::DepthUpscaleDepthStencilState");
 
 	// Create jitter offset constant buffer for depth upscaling
-	jitterCB = new ConstantBuffer(ConstantBufferDesc<JitterCB>());
+	jitterCB = new ConstantBuffer(ConstantBufferDesc<JitterCB>(), "Upscaling::JitterCB");
 
 	// Create upscaling data constant buffer for encode textures compute shader
-	upscalingDataCB = new ConstantBuffer(ConstantBufferDesc<UpscalingDataCB>());
+	upscalingDataCB = new ConstantBuffer(ConstantBufferDesc<UpscalingDataCB>(), "Upscaling::UpscalingDataCB");
 
 	// Create camera reprojection matrices constant buffer for menu motion vectors
 	cameraMotionVectorsCB = new ConstantBuffer(ConstantBufferDesc<CameraMotionVectorsCB>(), "Upscaling::CameraMotionVectorsCB");
@@ -2349,6 +2295,7 @@ void Upscaling::SetupResources()
 	blendDesc.RenderTarget[0].BlendEnable = false;
 	blendDesc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
 	DX::ThrowIfFailed(globals::d3d::device->CreateBlendState(&blendDesc, upscaleBlendState.put()));
+	Util::SetResourceName(upscaleBlendState.get(), "Upscaling::DepthUpscaleBlendState");
 
 	// Create rasterizer state for fullscreen rendering
 	D3D11_RASTERIZER_DESC rasterizerDesc = {};
@@ -2363,6 +2310,7 @@ void Upscaling::SetupResources()
 	rasterizerDesc.MultisampleEnable = false;
 	rasterizerDesc.AntialiasedLineEnable = false;
 	DX::ThrowIfFailed(globals::d3d::device->CreateRasterizerState(&rasterizerDesc, upscaleRasterizerState.put()));
+	Util::SetResourceName(upscaleRasterizerState.get(), "Upscaling::DepthUpscaleRasterizerState");
 
 	CheckResources(GetUpscaleMethod());
 
@@ -2470,9 +2418,8 @@ bool Upscaling::CopySharedD3D12Resources()
 
 void UpdateCameraData()
 {
-	using func_t = decltype(&UpdateCameraData);
-	static REL::Relocation<func_t> func{ RELOCATION_ID(75472, 77258) };
-	func();
+	constexpr std::uint32_t kEngineRenderCameraFlags = 0;
+	globals::game::renderer->UpdateCameraData(kEngineRenderCameraFlags);
 }
 
 void Upscaling::PostDisplay()
@@ -2763,15 +2710,6 @@ json Upscaling::GetDiagnostics()
 		diagnostics["dlssgStatus"] = std::string(magic_enum::enum_name(streamlineDX12.lastDLSSGStatus));
 		diagnostics["dlssgFramesPresentedLastQuery"] = streamlineDX12.lastDLSSGFramesPresented;
 	}
-	diagnostics["fsr4MethodSelected"] = IsRuntimeFsr4MethodSelected();
-	diagnostics["fsrAdapterClass"] = std::string(magic_enum::enum_name(fidelityFX.GetFsr4AdapterSupport()));
-	diagnostics["fsrConfiguredPath"] = fidelityFX.GetConfiguredFsrPathLabel();
-	diagnostics["fsrDisplayedPath"] = fidelityFX.GetDisplayedFsrPathLabel();
-	diagnostics["fsrRuntimeRequestedVersion"] = fidelityFX.GetRuntimeUpscalerRequestedVersionString();
-	diagnostics["fsrRuntimeProvider"] = fidelityFX.GetRuntimeUpscalerProviderName();
-	diagnostics["fsrRuntimeSupportConfirmed"] = fidelityFX.IsRuntimeUpscalerSupportConfirmed();
-	diagnostics["fsr4FailureLatched"] = fidelityFX.IsRuntimeFsr4FailureLatched();
-	diagnostics["fsrRuntimeFailureLatched"] = fidelityFX.IsRuntimeUpscalerFailureLatched();
 	const auto crop = neuralRendering.GetRegionOfInterest();
 	diagnostics["neuralRegionActive"] = crop.active;
 	json eyes = json::array();

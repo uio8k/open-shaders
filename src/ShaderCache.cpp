@@ -712,8 +712,7 @@ namespace SIE
 
 		static void GetLightingShaderDefines(uint32_t descriptor, std::span<D3D_SHADER_MACRO> defines)
 		{
-			static REL::Relocation<void(uint32_t, D3D_SHADER_MACRO*)> VanillaGetLightingShaderDefines(RELOCATION_ID(101631, 108698));
-			VanillaGetLightingShaderDefines(descriptor, defines.data());
+			RE::GetLightingShaderDefines(descriptor, reinterpret_cast<REX::W32::D3D_SHADER_MACRO*>(defines.data()));
 
 			size_t lastIndex = std::ranges::find_if(defines, [](const D3D_SHADER_MACRO& macro) { return macro.Name == nullptr; }) - defines.begin();
 
@@ -2385,13 +2384,10 @@ namespace SIE
 		std::unique_ptr<RE::BSGraphics::VertexShader> CreateVertexShader(ID3DBlob& shaderData,
 			const RE::BSShader& shader, uint32_t descriptor)
 		{
-			static const auto perTechniqueBuffersArray =
-				REL::Relocation<ID3D11Buffer**>(RELOCATION_ID(524755, 411371));
-			static const auto perMaterialBuffersArray =
-				REL::Relocation<ID3D11Buffer**>(RELOCATION_ID(524757, 411373));
-			static const auto perGeometryBuffersArray =
-				REL::Relocation<ID3D11Buffer**>(RELOCATION_ID(524759, 411375));
-			static const auto bufferData = REL::Relocation<void*>(RELOCATION_ID(524965, 411446));
+			static const auto perTechniqueBuffersArray = RE::BSGraphics::Renderer::GetVertexShaderPerTechniqueBuffers();
+			static const auto perMaterialBuffersArray = RE::BSGraphics::Renderer::GetVertexShaderPerMaterialBuffers();
+			static const auto perGeometryBuffersArray = RE::BSGraphics::Renderer::GetVertexShaderPerGeometryBuffers();
+			static const auto bufferData = RE::BSGraphics::Renderer::GetVertexShaderBufferData();
 
 			auto rawPtr =
 				new uint8_t[sizeof(RE::BSGraphics::VertexShader) + shaderData.GetBufferSize()];
@@ -2416,24 +2412,24 @@ namespace SIE
 					ShaderClass::Vertex, descriptor, shader);
 				if (bufferSizes[0] != 0) {
 					newShader->constantBuffers[0].buffer =
-						Util::AsW32(perTechniqueBuffersArray.get()[bufferSizes[0]]);
+						perTechniqueBuffersArray[bufferSizes[0]];
 				} else {
 					newShader->constantBuffers[0].buffer = nullptr;
-					newShader->constantBuffers[0].data = bufferData.get();
+					newShader->constantBuffers[0].data = bufferData;
 				}
 				if (bufferSizes[1] != 0) {
 					newShader->constantBuffers[1].buffer =
-						Util::AsW32(perMaterialBuffersArray.get()[bufferSizes[1]]);
+						perMaterialBuffersArray[bufferSizes[1]];
 				} else {
 					newShader->constantBuffers[1].buffer = nullptr;
-					newShader->constantBuffers[1].data = bufferData.get();
+					newShader->constantBuffers[1].data = bufferData;
 				}
 				if (bufferSizes[2] != 0) {
 					newShader->constantBuffers[2].buffer =
-						Util::AsW32(perGeometryBuffersArray.get()[bufferSizes[2]]);
+						perGeometryBuffersArray[bufferSizes[2]];
 				} else {
 					newShader->constantBuffers[2].buffer = nullptr;
-					newShader->constantBuffers[2].data = bufferData.get();
+					newShader->constantBuffers[2].data = bufferData;
 				}
 			}
 
@@ -2443,13 +2439,10 @@ namespace SIE
 		std::unique_ptr<RE::BSGraphics::PixelShader> CreatePixelShader(ID3DBlob& shaderData,
 			const RE::BSShader& shader, uint32_t descriptor)
 		{
-			static const auto perTechniqueBuffersArray =
-				REL::Relocation<ID3D11Buffer**>(RELOCATION_ID(524761, 411377));
-			static const auto perMaterialBuffersArray =
-				REL::Relocation<ID3D11Buffer**>(RELOCATION_ID(524763, 411379));
-			static const auto perGeometryBuffersArray =
-				REL::Relocation<ID3D11Buffer**>(RELOCATION_ID(524765, 411381));
-			static const auto bufferData = REL::Relocation<void*>(RELOCATION_ID(524967, 411448));
+			static const auto perTechniqueBuffersArray = RE::BSGraphics::Renderer::GetPixelShaderPerTechniqueBuffers();
+			static const auto perMaterialBuffersArray = RE::BSGraphics::Renderer::GetPixelShaderPerMaterialBuffers();
+			static const auto perGeometryBuffersArray = RE::BSGraphics::Renderer::GetPixelShaderPerGeometryBuffers();
+			static const auto bufferData = RE::BSGraphics::Renderer::GetPixelShaderBufferData();
 
 			auto newShader = std::make_unique<RE::BSGraphics::PixelShader>();
 			newShader->id = descriptor;
@@ -2469,24 +2462,24 @@ namespace SIE
 					ShaderClass::Pixel, descriptor, shader);
 				if (bufferSizes[0] != 0) {
 					newShader->constantBuffers[0].buffer =
-						Util::AsW32(perTechniqueBuffersArray.get()[bufferSizes[0]]);
+						perTechniqueBuffersArray[bufferSizes[0]];
 				} else {
 					newShader->constantBuffers[0].buffer = nullptr;
-					newShader->constantBuffers[0].data = bufferData.get();
+					newShader->constantBuffers[0].data = bufferData;
 				}
 				if (bufferSizes[1] != 0) {
 					newShader->constantBuffers[1].buffer =
-						Util::AsW32(perMaterialBuffersArray.get()[bufferSizes[1]]);
+						perMaterialBuffersArray[bufferSizes[1]];
 				} else {
 					newShader->constantBuffers[1].buffer = nullptr;
-					newShader->constantBuffers[1].data = bufferData.get();
+					newShader->constantBuffers[1].data = bufferData;
 				}
 				if (bufferSizes[2] != 0) {
 					newShader->constantBuffers[2].buffer =
-						Util::AsW32(perGeometryBuffersArray.get()[bufferSizes[2]]);
+						perGeometryBuffersArray[bufferSizes[2]];
 				} else {
 					newShader->constantBuffers[2].buffer = nullptr;
-					newShader->constantBuffers[2].data = bufferData.get();
+					newShader->constantBuffers[2].data = bufferData;
 				}
 			}
 
@@ -2728,8 +2721,10 @@ namespace SIE
 	}
 
 	RE::BSGraphics::VertexShader* ShaderCache::GetVertexShader(const RE::BSShader& shader,
-		uint32_t descriptor)
+		uint32_t descriptor, bool a_precompile)
 	{
+		if (a_precompile && backgroundCompilation)
+			return nullptr;
 		if (!SShaderCache::ResolveImageSpaceDescriptor(shader, descriptor)) {
 			return nullptr;
 		}
@@ -2768,7 +2763,7 @@ namespace SIE
 		}
 
 		if (IsAsync()) {
-			compilationSet.Add({ ShaderClass::Vertex, shader, descriptor });
+			compilationSet.Add({ ShaderClass::Vertex, shader, descriptor, a_precompile });
 		} else {
 			return MakeAndAddVertexShader(shader, descriptor);
 		}
@@ -2777,8 +2772,10 @@ namespace SIE
 	}
 
 	RE::BSGraphics::PixelShader* ShaderCache::GetPixelShader(const RE::BSShader& shader,
-		uint32_t descriptor)
+		uint32_t descriptor, bool a_precompile)
 	{
+		if (a_precompile && backgroundCompilation)
+			return nullptr;
 		auto state = globals::state;
 		if (globals::game::isVR && strcmp(shader.fxpFilename, "OBBOcclusionTesting") == 0)
 			// use vanilla shader
@@ -2817,7 +2814,7 @@ namespace SIE
 		}
 
 		if (IsAsync()) {
-			compilationSet.Add({ ShaderClass::Pixel, shader, descriptor });
+			compilationSet.Add({ ShaderClass::Pixel, shader, descriptor, a_precompile });
 		} else {
 			return MakeAndAddPixelShader(shader, descriptor);
 		}
@@ -3675,6 +3672,24 @@ namespace SIE
 			// Serialize with WaitTake's predicate check and transition into wait.
 			std::scoped_lock lock{ compilationSet.compilationMutex };
 			backgroundCompilation = value;
+			if (value) {
+				for (auto it = compilationSet.availableTasks.begin(); it != compilationSet.availableTasks.end();) {
+					if (!it->IsPrecompile()) {
+						++it;
+						continue;
+					}
+					--compilationSet.totalTasks;
+					compilationSet.totalPriorityWeight -= static_cast<uint64_t>(it->GetPriority()) + 1;
+					it = compilationSet.availableTasks.erase(it);
+				}
+				if (compilationSet.totalTasks != 0 &&
+					compilationSet.completedTasks + compilationSet.failedTasks >= compilationSet.totalTasks &&
+					compilationSet.completionTime.load(std::memory_order_relaxed) == 0) {
+					LARGE_INTEGER now;
+					QueryPerformanceCounter(&now);
+					compilationSet.completionTime.store(now.QuadPart, std::memory_order_relaxed);
+				}
+			}
 		}
 		compilationSet.conditionVariable.notify_one();
 	}
@@ -3939,7 +3954,7 @@ namespace SIE
 	{
 		CSimpleIniA ini;
 		ini.SetUnicode();
-		ini.LoadFile((DiskCachePath() / L"Info.ini").c_str());
+		const bool cacheInfoLoaded = ini.LoadFile((DiskCachePath() / L"Info.ini").c_str()) >= 0;
 		{
 			std::lock_guard lock{ mismatchesMutex };
 			cacheMismatches.clear();
@@ -3953,6 +3968,27 @@ namespace SIE
 		heldMismatchDefines.clear();
 
 		RefreshPreviousDiskCacheInfo();
+
+		{
+			std::optional<std::string> recordedRuntime;
+			if (auto runtime = ini.GetValue("Cache", "Runtime"))
+				recordedRuntime = runtime;
+			std::optional<bool> vrFeatureEnabled;
+			if (ini.GetValue("VR", "Enabled"))
+				vrFeatureEnabled = ini.GetBoolValue("VR", "Enabled", false);
+			const auto cacheRuntime = cacheInfoLoaded ?
+			                              Util::CacheInvalidation::DetectCacheRuntime(recordedRuntime, vrFeatureEnabled) :
+			                              Util::CacheInvalidation::CacheRuntime::Unknown;
+			const bool mismatch = Util::CacheInvalidation::IsCacheRuntimeMismatch(cacheRuntime, globals::game::isVR);
+			wrongRuntimeCache = mismatch ? cacheRuntime : Util::CacheInvalidation::CacheRuntime::Unknown;
+			if (mismatch)
+				requireDigestForReuse = true;
+			if (mismatch)
+				logger::warn("Disk cache was built for {} but this is a {} install; its shaders cannot be reused and will recompile. Install the {} shader cache",
+					cacheRuntime == Util::CacheInvalidation::CacheRuntime::VR ? "VR" : "SE/AE",
+					globals::game::isVR ? "VR" : "SE/AE",
+					globals::game::isVR ? "VR" : "SE/AE");
+		}
 
 		std::optional<std::string> cachedCompileFlags;
 		if (auto compileFlags = ini.GetValue("Cache", "CompileFlags"))
@@ -4240,6 +4276,7 @@ namespace SIE
 		ini.SetUnicode();
 		ini.SetValue("Cache", "PluginVersion", Plugin::VERSION.string().c_str());
 		ini.SetValue("Cache", "CompileFlags", GetCurrentCompileFlagsTag().c_str());
+		ini.SetValue("Cache", "Runtime", globals::game::isVR ? "VR" : "SE");
 		globals::state->WriteDiskCacheInfo(ini);
 		if (ini.SaveFile((DiskCachePath() / L"Info.ini").c_str()) < 0) {
 			logger::error("Failed to save disk cache info; the cache will be revalidated from scratch next boot");
@@ -5207,10 +5244,11 @@ namespace SIE
 
 	ShaderCompilationTask::ShaderCompilationTask(ShaderClass aShaderClass,
 		const RE::BSShader& aShader,
-		uint32_t aDescriptor) :
+		uint32_t aDescriptor, bool a_precompile) :
 		shaderClass(aShaderClass),
 		shader(aShader), descriptor(aDescriptor),
-		cachedPriority(ComputePriority(aShaderClass, aShader, aDescriptor))
+		cachedPriority(ComputePriority(aShaderClass, aShader, aDescriptor)),
+		precompile(a_precompile)
 	{}
 
 	void ShaderCompilationTask::LogCacheInput() const
@@ -5407,6 +5445,8 @@ namespace SIE
 	void CompilationSet::Add(const ShaderCompilationTask& task)
 	{
 		std::unique_lock lock(compilationMutex);
+		if (task.IsPrecompile() && globals::shaderCache->backgroundCompilation)
+			return;
 		auto inProgressIt = tasksInProgress.find(task);
 		auto processedIt = processedTasks.find(task);
 		// Shared bytecode still needs a runtime shader object for each descriptor.
@@ -5416,7 +5456,12 @@ namespace SIE
 			auto queuedTask = task;
 			queuedTask.SetEnqueuedQpc(now.QuadPart);
 			queuedTask.SetGeneration(LiveGeneration(task.GetType()));
-			auto [_, wasAdded] = availableTasks.insert(queuedTask);
+			auto [queuedIt, wasAdded] = availableTasks.insert(queuedTask);
+			if (!wasAdded && !task.IsPrecompile() && queuedIt->IsPrecompile()) {
+				auto node = availableTasks.extract(queuedIt);
+				node.value().RequireForRendering();
+				availableTasks.insert(std::move(node));
+			}
 			if (wasAdded) {
 				// Increment counters inside the lock so that TryTakeNext, which reads
 				// IsCompiling() after waking up, sees the updated totalTasks and

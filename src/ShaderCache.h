@@ -244,7 +244,7 @@ namespace SIE
 			Completed
 		};
 		ShaderCompilationTask(ShaderClass shaderClass, const RE::BSShader& shader,
-			uint32_t descriptor);
+			uint32_t descriptor, bool a_precompile = false);
 		/** @brief Compiles the shader, writing the result to the ShaderCache. */
 		void Perform() const;
 
@@ -276,6 +276,10 @@ namespace SIE
 		void SetGeneration(uint64_t gen) { generation = gen; }
 		/** @brief Gets the batch generation this task was enqueued under, for staleness checks against a later Clear(). */
 		uint64_t GetGeneration() const { return generation; }
+		/** Whether this task was requested only to populate the startup cache. */
+		bool IsPrecompile() const { return precompile; }
+		/** Keeps a queued startup task when rendering requests the same permutation. */
+		void RequireForRendering() { precompile = false; }
 		/** @brief Shader type this task compiles for, which selects the per-type epoch its generation embeds. */
 		RE::BSShader::Type GetType() const { return shader.shaderType.get(); }
 
@@ -291,6 +295,7 @@ namespace SIE
 		int cachedPriority;
 		int64_t enqueuedQpc = 0;
 		uint64_t generation = 0;
+		bool precompile = false;
 	};
 }
 
@@ -635,6 +640,9 @@ namespace SIE
 		/// disk, this session compiles memory-only, and the menu offers rebuild vs
 		/// fix-setup-and-restart (after a fix the cache revalidates untouched).
 		bool IsDiskCacheHeld() const { return diskCacheHeld; }
+		/// Runtime of the on-disk cache found at boot when it was built for the other one (flat vs VR), else Unknown.
+		/// Its shaders cannot be reused, so the whole cache recompiles; cleared by nothing, it reports this boot only.
+		Util::CacheInvalidation::CacheRuntime GetWrongRuntimeCache() const { return wrongRuntimeCache; }
 		/// True when the cache was kept across a version change, so a blob without a recorded digest must recompile.
 		bool RequiresDigestForReuse() const { return requireDigestForReuse; }
 
@@ -750,9 +758,11 @@ namespace SIE
 		bool IsShaderKeyAbsent(const std::string& a_key);
 		std::string GetShaderStatsString(bool a_timeOnly = false, bool a_elapsedOnly = false);
 
-		RE::BSGraphics::VertexShader* GetVertexShader(const RE::BSShader& shader, uint32_t descriptor);
+		/** Requests a vertex shader; optional startup precompiles are skipped in background mode. */
+		RE::BSGraphics::VertexShader* GetVertexShader(const RE::BSShader& shader, uint32_t descriptor, bool a_precompile = false);
+		/** Requests a pixel shader; optional startup precompiles are skipped in background mode. */
 		RE::BSGraphics::PixelShader* GetPixelShader(const RE::BSShader& shader,
-			uint32_t descriptor);
+			uint32_t descriptor, bool a_precompile = false);
 		RE::BSGraphics::ComputeShader* GetComputeShader(const RE::BSShader& shader,
 			uint32_t descriptor);
 
@@ -942,7 +952,7 @@ namespace SIE
 		int32_t backgroundCompilationThreadCount = std::max(static_cast<int32_t>(Util::GetPerformanceCoreCount()) / 2, 1);
 		BS::thread_pool<> compilationPool{ static_cast<std::size_t>(compilationThreadCount) };
 		std::jthread managementJthread;  // dedicated thread for ManageCompilationSet (not in pool)
-		/** @brief Updates compilation mode and wakes the dispatcher to recheck its capacity. */
+		/** Switches compilation mode, dropping unstarted precompiles when entering background mode. */
 		void SetBackgroundCompilation(bool value);
 		// atomic: written from the menu/input thread (boot setting + Skip Compilation hotkey),
 		// read on the management/compile and render threads.
@@ -1295,6 +1305,7 @@ namespace SIE
 		// Written only on the main thread under mismatchesMutex; compile workers, the menu and devbench read
 		// single flags lock-free, and GetRollbackState() reads all of them together.
 		std::atomic<bool> diskCacheHeld = false;
+		std::atomic<Util::CacheInvalidation::CacheRuntime> wrongRuntimeCache{ Util::CacheInvalidation::CacheRuntime::Unknown };
 		std::atomic<bool> featureSetChanged = false;
 		std::atomic<bool> featureSetRevertPending = false;
 		std::atomic<bool> featureSetCacheBackedUp = false;
