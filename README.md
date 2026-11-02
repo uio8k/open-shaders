@@ -12,6 +12,8 @@
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/alandtse/open-shaders)
 
+**English** | [简体中文](README.zh-CN.md)
+
 # Open Shaders
 
 SKSE core plugin for advanced graphics modifications for Skyrim and fork of Community Shaders.
