@@ -68,7 +68,12 @@ namespace SharedData
 		// Only read by the GRASS_OPTIMIZATIONS permutation, for grass drawn with an LOD mesh.
 		float MidLODBrightness;
 		float FarLODBrightness;
-		float3 pad0;
+		float PBRWrappedLightingAmount;
+		float SubsurfaceBalance;
+		float CanopyOcclusion;
+		float ClumpShading;
+		bool EnableNewLightingModel;
+		float2 pad0;
 	};
 
 	struct CPMSettings
@@ -293,9 +298,9 @@ namespace SharedData
 		float EnvIBLSaturation;
 		float SkyIBLSaturation;
 		float FogAmount;
-		uint DALCMode;  // 0: Luminance Ratio, 1: Color Ratio, 2: DALC + Sky, 3: DALC + Sky (Directional)
+		uint DALCMode;       // 0: Luminance Ratio, 1: Color Ratio, 2: DALC + Sky, 3: DALC + Sky (Directional)
+		uint ENBSkyFalloff;  // Effects 11 owns IBL: darken sky irradiance from below
 		float pad0;
-		float pad1;
 	};
 
 	struct ExtendedTranslucencySettings
@@ -704,7 +709,7 @@ namespace SharedData
 		float2 pad1;
 	};
 
-#if defined(SNOW_COVER) && defined(PSHADER)
+#if defined(SNOW_COVER) && (defined(PSHADER) || defined(COMPUTESHADER))
 	struct SnowCoverSettings
 	{
 		float Month;
@@ -792,7 +797,7 @@ namespace SharedData
 		GrassCollisionData grassCollisionData;
 		HorizonFixSettings horizonFixSettings;
 		RainRefractionSettings rainRefractionSettings;
-#if defined(SNOW_COVER) && defined(PSHADER)
+#if defined(SNOW_COVER) && (defined(PSHADER) || defined(COMPUTESHADER))
 		SnowCoverSettings snowCoverSettings;
 #endif
 	};

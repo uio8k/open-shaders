@@ -268,6 +268,10 @@ public:
 	virtual void LoadSettings(json& o_json) override;
 	virtual void RestoreDefaultSettings() override;
 	virtual void DataLoaded() override;
+	/** @brief Samples eye-tracked foveation gaze once per frame. */
+	void Prepass() override;
+	/** @brief Stops the gaze listener when the feature is toggled off at runtime. */
+	void OnRuntimeDisabled() override;
 
 	/**
 	 * @brief Installs Direct3D-related hooks for device and factory creation.
@@ -501,7 +505,6 @@ public:
 	// Unified interface methods - external code should use these instead of direct access
 	void LoadUpscalingSDKs();  // Loads all SDKs at once
 	HANDLE GetFrameLatencyWaitableObject() const;
-	float GetFrameTime() const;
 
 	// Backend interface methods
 	bool IsBackendInitialized() const;

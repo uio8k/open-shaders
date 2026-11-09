@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT AND (LicenseRef-GPL-3.0-with-Modding-Exception WITH GPL-3.0-linking-source-exception)
+// Original code Copyright (c) 2022 Ilya Perapechka (MIT), modifications GPL-3.0 with Modding Exception (see EXCEPTIONS.md)
+
 #include "Common/Color.hlsli"
 #include "Common/FrameBuffer.hlsli"
 #include "Common/GBuffer.hlsli"
@@ -637,6 +640,12 @@ float3 GetLightingColor(
 	}
 #		endif
 
+#		if defined(SKYLIGHTING) && !defined(INTERIOR)
+	const float3 sceneAmbientColor = ShadowSampling::GetAmbientLighting(skylightingDiffuse);
+#		else
+	const float3 sceneAmbientColor = ShadowSampling::GetAmbientLighting();
+#		endif
+
 	float3 dirColor;
 	float3 ambientColor;
 	float3 influencedDirColor = 0.0;
@@ -644,13 +653,8 @@ float3 GetLightingColor(
 	const bool useAmbientEffectLighting = UseAmbientEffectLighting();
 	bool useWeatherEffectLighting = !suppressExternalEmittance && !useAmbientEffectLighting;
 	if (useWeatherEffectLighting) {
-#		if defined(SKYLIGHTING) && !defined(INTERIOR)
-		float3 effectAmbientLighting = ShadowSampling::GetAmbientLighting(skylightingDiffuse);
-#		else
-		float3 effectAmbientLighting = ShadowSampling::GetAmbientLighting();
-#		endif
 		float3 weatherReference = Color::EffectLightToGamma(color);
-		float3 ambientReference = Color::EffectLightToGamma(effectAmbientLighting);
+		float3 ambientReference = Color::EffectLightToGamma(sceneAmbientColor);
 		float3 directionalReference = Color::EffectLightToGamma(GetEffectDirectionalLighting());
 		ExtractEffectLightingReference(weatherReference, ambientReference, directionalReference, dirColor, ambientColor);
 		applyWeatherInfluenceToShadows = ENABLE_LL && lightingInfluence > 0.0 && lightingInfluence < 1.0;
@@ -660,11 +664,7 @@ float3 GetLightingColor(
 		}
 	} else {
 		dirColor = useAmbientEffectLighting ? GetEffectDirectionalLighting() * EffectDirectionalLightScale : ShadowSampling::GetDirectionalLighting();
-#		if defined(SKYLIGHTING) && !defined(INTERIOR)
-		ambientColor = ShadowSampling::GetAmbientLighting(skylightingDiffuse);
-#		else
-		ambientColor = ShadowSampling::GetAmbientLighting();
-#		endif
+		ambientColor = sceneAmbientColor;
 	}
 
 #		if defined(EFFECTS11)
@@ -672,11 +672,7 @@ float3 GetLightingColor(
 		useWeatherEffectLighting = false;
 		applyWeatherInfluenceToShadows = false;
 		dirColor = ShadowSampling::GetDirectionalLighting();
-#			if defined(SKYLIGHTING) && !defined(INTERIOR)
-		ambientColor = ShadowSampling::GetAmbientLighting(skylightingDiffuse);
-#			else
-		ambientColor = ShadowSampling::GetAmbientLighting();
-#			endif
+		ambientColor = sceneAmbientColor;
 		dirColor *= SharedData::enbSettings.ParticleLightingInfluence;
 		ambientColor *= SharedData::enbSettings.ParticleAmbientInfluence;
 	}
@@ -972,12 +968,27 @@ PS_OUTPUT ShadeEffect(PS_INPUT input, bool sampleDistantShadow)
 
 #	if defined(EFFECTS11)
 	bool isFire = false;
-#		if defined(ADDBLEND)
-#			if defined(SOFT)
-	if (Permutation::PixelShaderDescriptor & Permutation::EffectFlags::GrayscaleToColor && Permutation::PixelShaderDescriptor & Permutation::EffectFlags::GrayscaleToAlpha)
-		isFire = true;
-#			elif defined(PARTICLES) && defined(TEXCOORD_INDEX) && defined(INDEXED_TEXTURE)
+	bool isLightSprite = false;
+#		if defined(ADDBLEND) && !defined(LIGHTING) && !defined(MEMBRANE) && !defined(BLOOD) && !defined(PROJECTED_UV)
+	const bool grayscaleToColor = Permutation::PixelShaderDescriptor & Permutation::EffectFlags::GrayscaleToColor;
+	const bool grayscaleToAlpha = Permutation::PixelShaderDescriptor & Permutation::EffectFlags::GrayscaleToAlpha;
+	const bool skyObject = Permutation::VertexShaderDescriptor & Permutation::EffectFlags::SkyObject;
+#			if defined(TEXTURE)
+	const bool plainTexture = !grayscaleToColor && !grayscaleToAlpha && !(Permutation::PixelShaderDescriptor & Permutation::EffectFlags::IgnoreTexAlpha);
+#			else
+	const bool plainTexture = false;
+#			endif
+#			if defined(PARTICLES) && defined(TEXCOORD_INDEX) && defined(INDEXED_TEXTURE) && !defined(SOFT)
 	isFire = true;
+#			else
+	// ENB's classes: a palette-mapped additive effect (a spell bolt, a flame) is fire; a light sprite is a sky glow or a soft
+	// plain-textured glow. Everything else keeps its own brightness.
+	isFire = grayscaleToColor && grayscaleToAlpha;
+#				if defined(SOFT)
+	isLightSprite = !isFire && (skyObject || plainTexture);
+#				else
+	isLightSprite = !isFire && skyObject;
+#				endif
 #			endif
 #		endif
 
@@ -990,6 +1001,54 @@ PS_OUTPUT ShadeEffect(PS_INPUT input, bool sampleDistantShadow)
 #	if defined(EFFECTS11) && defined(IS_VOLUMETRIC_FOG)
 	const bool isEnbVolumetricFog = SharedData::enbSettings.Enable && !(Permutation::VertexShaderDescriptor & Permutation::EffectFlags::SkyObject) &&
 	                                (Permutation::PixelShaderDescriptor & Permutation::EffectFlags::GrayscaleToAlpha) && !(Permutation::PixelShaderDescriptor & Permutation::EffectFlags::GrayscaleToColor);
+#	endif
+
+	float alpha = baseColor.w;
+
+#	if defined(BLOOD)
+	alpha = baseColor.y;
+	float deltaY = saturate(baseColor.y - AlphaTestRef.x);
+	float bloodMul = baseColor.z;
+#		if defined(VC)
+	bloodMul *= input.Color.w;
+#		endif
+	if (deltaY < AlphaTestRef.y) {
+		bloodMul *= (deltaY / AlphaTestRef.y);
+	}
+	baseColor.xyz = saturate(float3(2, 1, 1) - bloodMul.xxx) * (-bloodMul * AlphaTestRef.z + 1);
+#	endif
+
+	alpha *= PropertyColor.w;
+
+	float baseColorScale = BaseColorScale.x;
+
+#	if defined(MEMBRANE)
+	baseColor.xyz = (PropertyColor.xyz + baseColor.xyz) * alpha + membraneColor.xyz * membraneColor.w;
+	alpha += membraneColor.w;
+	baseColorScale = MembraneVars.z;
+#	endif
+
+	if (Permutation::PixelShaderDescriptor & Permutation::EffectFlags::GrayscaleToAlpha)
+		alpha = TexGrayscaleSampler.Sample(SampGrayscaleSampler, float2(baseTexColor.w, alpha)).w;
+
+	[branch] if (Permutation::PixelShaderDescriptor & Permutation::EffectFlags::GrayscaleToColor)
+	{
+		float2 grayscaleToColorUv = float2(baseTexColor.y, baseColorMul.x);
+#	if defined(MEMBRANE)
+		grayscaleToColorUv.y = PropertyColor.x;
+#	endif
+		baseColor.xyz = baseColorScale * TexGrayscaleSampler.Sample(SampGrayscaleSampler, grayscaleToColorUv).xyz;
+	}
+
+#	if defined(EFFECTS11) && defined(IS_VOLUMETRIC_FOG)
+	[branch] if (isEnbVolumetricFog)
+		alpha = saturate(alpha * SharedData::enbSettings.VolumetricFogOpacity);
+#	endif
+
+#	if !defined(MOTIONVECTORS_NORMALS)
+	if (alpha * fogMul.w - AlphaTestRefRS < 0) {
+		discard;
+	}
 #	endif
 
 #	if defined(LIGHTING)
@@ -1082,47 +1141,9 @@ PS_OUTPUT ShadeEffect(PS_INPUT input, bool sampleDistantShadow)
 	lightingInfluence = 0;
 #	endif
 
-	float alpha = baseColor.w;
-
-#	if defined(BLOOD)
-	alpha = baseColor.y;
-	float deltaY = saturate(baseColor.y - AlphaTestRef.x);
-	float bloodMul = baseColor.z;
-#		if defined(VC)
-	bloodMul *= input.Color.w;
-#		endif
-	if (deltaY < AlphaTestRef.y) {
-		bloodMul *= (deltaY / AlphaTestRef.y);
-	}
-	baseColor.xyz = saturate(float3(2, 1, 1) - bloodMul.xxx) * (-bloodMul * AlphaTestRef.z + 1);
-#	endif
-
-	alpha *= PropertyColor.w;
-
-	float baseColorScale = BaseColorScale.x;
-
-#	if defined(MEMBRANE)
-	baseColor.xyz = (PropertyColor.xyz + baseColor.xyz) * alpha + membraneColor.xyz * membraneColor.w;
-	alpha += membraneColor.w;
-	baseColorScale = MembraneVars.z;
-#	endif
-
-	if (Permutation::PixelShaderDescriptor & Permutation::EffectFlags::GrayscaleToAlpha)
-		alpha = TexGrayscaleSampler.Sample(SampGrayscaleSampler, float2(baseTexColor.w, alpha)).w;
-
-	[branch] if (Permutation::PixelShaderDescriptor & Permutation::EffectFlags::GrayscaleToColor)
-	{
-		float2 grayscaleToColorUv = float2(baseTexColor.y, baseColorMul.x);
-#	if defined(MEMBRANE)
-		grayscaleToColorUv.y = PropertyColor.x;
-#	endif
-		baseColor.xyz = baseColorScale * TexGrayscaleSampler.Sample(SampGrayscaleSampler, grayscaleToColorUv).xyz;
-	}
-
 #	if defined(EFFECTS11) && defined(IS_VOLUMETRIC_FOG)
 	[branch] if (isEnbVolumetricFog)
 	{
-		alpha = saturate(alpha * SharedData::enbSettings.VolumetricFogOpacity);
 		float volumetricFogShadow = 1.0;
 		[branch] if (SharedData::enbSettings.VolumetricFogEnableShadows)
 			volumetricFogShadow = GetViewRayShadow(input.WorldPosition.xyz, depth, eyeIndex, screenNoise, sampleDistantShadow);
@@ -1145,12 +1166,6 @@ PS_OUTPUT ShadeEffect(PS_INPUT input, bool sampleDistantShadow)
 
 	baseColor.xyz = Color::CompensateGammaInput(baseColor.xyz, Color::GameGamma);
 	float3 lightColor = lerp(baseColor.xyz, propertyColor * baseColor.xyz, lightingInfluence);
-
-#	if !defined(MOTIONVECTORS_NORMALS)
-	if (alpha * fogMul.w - AlphaTestRefRS < 0) {
-		discard;
-	}
-#	endif
 
 #	if !defined(LIGHTING) && defined(VC) && defined(TEXCOORD) && defined(NORMALS) && defined(TEXTURE) && defined(FALLOFF) && defined(SOFT)
 	const bool isSkyStatic = (Permutation::PixelShaderDescriptor & Permutation::EffectFlags::GrayscaleToAlpha) && lightingInfluence == 1.0;
@@ -1228,7 +1243,7 @@ PS_OUTPUT ShadeEffect(PS_INPUT input, bool sampleDistantShadow)
 	if (SharedData::enbSettings.Enable) {
 		if (isFire)
 			blendedColor = pow(abs(blendedColor), SharedData::enbSettings.FireCurve) * SharedData::enbSettings.FireIntensity;
-		else
+		else if (isLightSprite)
 			blendedColor = pow(abs(blendedColor), SharedData::enbSettings.LightSpriteCurve) * SharedData::enbSettings.LightSpriteIntensity;
 	}
 #			endif

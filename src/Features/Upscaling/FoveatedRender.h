@@ -22,6 +22,7 @@
 // ============================================================================
 
 #include "../../Utils/BootSnapshot.h"
+#include "../../Utils/GazeProvider.h"
 #include "../../Utils/Subrect.h"
 
 #include <chrono>
@@ -29,6 +30,9 @@
 
 struct FoveatedRender
 {
+	/** @brief Initializes stereo crop defaults before settings snapshots are captured. */
+	FoveatedRender();
+
 	// DLSS execution mode for VR
 	enum class DlssMode : uint
 	{
@@ -98,6 +102,12 @@ struct FoveatedRender
 		float subrectFeatherWidth = 64.0f;
 		float subrectFalloffCurve = 1.0f;
 		float subrectDitherStrength = 1.0f;
+		bool gazeFollow = false;
+		uint gazeSource = 0;  // 0 SteamVR then OSC, 1 SteamVR only, 2 OSC only
+		uint gazeOscPort = Util::Gaze::kDefaultOscPort;
+		float gazeRecentreThreshold = 0.2f;
+		float gazeOffsetX = 0.0f;
+		float gazeOffsetY = 0.0f;
 	};
 
 	inline static constexpr Util::Settings::RestartTable<Settings, 1> kRestartFields{ {
@@ -105,7 +115,7 @@ struct FoveatedRender
 	} };
 	Util::Settings::BootSnapshot<Settings> bootSnapshot{ kRestartFields };
 
-	/** @brief Region-preset display names, shared by PostPostLoad's seed list, the
+	/** @brief Region-preset display names, shared by the constructor's seed list, the
 	 *  top-level preset buttons, and Upscaling::ApplyPerformanceProfile. */
 	static constexpr const char* kPresetFullEye = "Full Eye";                          ///< No crop; full-eye DLSS coverage.
 	static constexpr const char* kPresetCenter75 = "Center 75%";                       ///< Centered crop covering 75% of the eye.
@@ -128,12 +138,30 @@ struct FoveatedRender
 	void LoadSettings(const json& o_json);
 	void RestoreDefaultSettings();
 	void ClearShaderCache();
-	// Called from Upscaling::PostPostLoad to seed subrect presets.
+	// Called from Upscaling::PostPostLoad to latch restart-gated settings.
 	void PostPostLoad();
 
 	bool IsRuntimeSupported() const;
 	bool IsActive() const;
 	bool IsLoaded() const { return enabledAtBoot; }
+
+	/** @brief Samples gaze and pushes it to the subrect controller; called once per frame. */
+	void UpdateGaze();
+
+	/** @brief True once after a gaze recentre, or after gaze activates or deactivates. */
+	bool ConsumeGazeRecentred() { return subrectController.ConsumeGazeRecentred(); }
+
+	/** @brief True once per eye after its gazed region moved; the upscaler resets that eye's history. */
+	bool ConsumeGazeEyeReset(uint32_t eye) { return subrectController.ConsumeGazeEyeReset(eye); }
+
+	/** @brief Last gaze sample's counters, for the settings panel and devbench. */
+	Util::Gaze::Status GetGazeStatus() const { return gazeProvider.GetStatus(); }
+
+	/** @brief True while gaze decides the reported crop instead of the saved one. */
+	bool IsGazeOverrideActive() const { return subrectController.IsGazeActive(); }
+
+	/** @brief Closes the OSC listener; the provider restarts it lazily on the next poll. */
+	void ShutdownGaze() { gazeProvider.Shutdown(); }
 
 	/** @brief True while drag-resizing the crop region, and for a few seconds after.
 	 *  Read by the stretch pass alongside settings.debugVisualize. */
@@ -191,6 +219,9 @@ private:
 	bool enabledAtBoot = false;                            // latched from settings.enabled at boot
 	uint qualityModeAtBoot = 4;                            // latched from Upscaling::Settings::qualityMode at boot
 	std::chrono::steady_clock::time_point lastDragTime{};  // epoch -- no force-visualize at boot
+	Util::Gaze::Provider gazeProvider;
+
+	void DrawGazeSettings();
 
 	bool IsPresetCompatibleWithMode(uint presetIndex) const;
 	void ClampPresetToMode();

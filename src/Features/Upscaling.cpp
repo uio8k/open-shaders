@@ -5,6 +5,7 @@
 #include "Deferred.h"
 #include "HDRDisplay.h"
 #include "Hooks.h"
+#include "Menu.h"
 #include "State.h"
 #include "Upscaling/DX12SwapChain.h"
 #include "Upscaling/FidelityFX.h"
@@ -19,6 +20,7 @@
 #include "Utils/DevBenchUx.h"
 #include "Utils/Game.h"
 #include "Utils/UI.h"
+#include "Utils/VersionedRelocation.h"
 #include <Windows.h>
 #include <algorithm>
 #include <cfloat>
@@ -33,7 +35,7 @@
 
 namespace NR
 {
-	NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(NR::Tuning, intensity, localToneStrength, localStructureStrength, skinStructureStrength,
+	NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(NR::Tuning, intensity, localToneStrength, localStructureStrength, skinStructureStrength, colorStrength,
 		skinToneStrength, hairToneStrength, eyeToneStrength, foliageToneStrength, landscapeToneStrength,
 		style, useAutoMask, regionOfInterest, regionOverlay, regionFit, regionGroup, regionFollowFoveation,
 		parallelEyes, allowUnverifiedRuntime, runtimeVariant, materialStrength, strengthSkin, strengthHair, strengthEyes, strengthFoliage, strengthLandscape, strengthCloth, strengthMetal,
@@ -521,7 +523,7 @@ bool Upscaling::MatchesPerformanceProfile(PerfProfile profile) const
 	if (!expectedUV) {
 		return false;
 	}
-	const auto& currentUV = foveatedRender.subrectController.GetUV();
+	const auto& currentUV = foveatedRender.subrectController.GetSavedUV();
 	return currentUV.x == expectedUV->x && currentUV.y == expectedUV->y &&
 	       currentUV.w == expectedUV->w && currentUV.h == expectedUV->h;
 }
@@ -550,6 +552,13 @@ std::string Upscaling::GetProfilePreviewText(PerfProfile profile) const
 
 namespace
 {
+	/** @brief The value, or null when the runtime did not report it. */
+	template <class T>
+	json optionalJson(const std::optional<T>& value)
+	{
+		return value ? json(*value) : json(nullptr);
+	}
+
 	/** @brief Devbench payload for Upscaling's neuralRenderingStatus query. */
 	json NeuralRenderingStatus(const Feature* self, const json&)
 	{
@@ -573,6 +582,18 @@ namespace
 			{ "ngxResult", json::array({ status.ngxResult[0], status.ngxResult[1] }) },
 			{ "lastAppliedFrame", status.lastAppliedFrame },
 			{ "appliedFrames", status.appliedFrames },
+			{ "capability", json{
+								{ "queried", status.capability.queried },
+								{ "reportsAvailability", status.capability.reportsAvailability },
+								{ "available", status.capability.available },
+								{ "reportsDriver", status.capability.reportsDriver },
+								{ "needsUpdatedDriver", status.capability.needsUpdatedDriver },
+								{ "minDriverMajor", optionalJson(status.capability.minDriverMajor) },
+								{ "minDriverMinor", optionalJson(status.capability.minDriverMinor) },
+								{ "hasMemory", status.capability.hasMemory },
+								{ "memoryBytes", status.capability.memoryBytes },
+								{ "optimizationLevel", optionalJson(status.capability.optimizationLevel) },
+								{ "developmentBranch", optionalJson(status.capability.developmentBranch) } } },
 			{ "runtimeAvailability", magic_enum::enum_name(availability.state) },
 			{ "runtimeVersion", availability.version },
 			{ "runtimeDetail", availability.reason },
@@ -609,6 +630,30 @@ namespace
 		};
 	}
 
+	/** @brief Devbench payload for Upscaling's gazeStatus query. */
+	json GazeStatus(const Feature* self, const json&)
+	{
+		const auto* upscaling = static_cast<const Upscaling*>(self);
+		const auto& foveated = upscaling->foveatedRender;
+		const auto status = foveated.GetGazeStatus();
+		return json{
+			{ "enabled", foveated.settings.gazeFollow },
+			{ "source", magic_enum::enum_name(status.source) },
+			{ "sourceMode", foveated.settings.gazeSource },
+			{ "valid", status.valid },
+			{ "active", foveated.IsGazeOverrideActive() },
+			{ "centres", json::array({ json::array({ status.centre[0].x, status.centre[0].y }),
+							 json::array({ status.centre[1].x, status.centre[1].y }) }) },
+			{ "validFrames", status.validFrames },
+			{ "recentreThreshold", foveated.settings.gazeRecentreThreshold },
+			{ "oscListening", status.oscListening },
+			{ "oscPort", status.oscPort },
+			{ "oscPackets", status.oscPackets },
+			{ "oscBindFailed", status.oscBindFailed },
+			{ "lastOscAddress", status.lastOscAddress },
+		};
+	}
+
 	/** @brief Devbench handler for Upscaling's retryNeuralRendering command. */
 	void RetryNeuralRendering(Feature* self, const json&)
 	{
@@ -632,6 +677,16 @@ namespace
 	}
 }
 
+void Upscaling::Prepass()
+{
+	foveatedRender.UpdateGaze();
+}
+
+void Upscaling::OnRuntimeDisabled()
+{
+	foveatedRender.ShutdownGaze();
+}
+
 /** @brief Registers upscaling and frame-generation commands for menu and devbench use. */
 void Upscaling::RegisterUxActions()
 {
@@ -643,7 +698,7 @@ void Upscaling::RegisterUxActions()
 				logger::warn("[FOVEATED] applyFoveationPreset preset {} not found; not applied", json(name).dump());
 		});
 
-	FEATURE_QUERY("runtimeUpgradeStatus",
+	FEATURE_RENDER_QUERY("runtimeUpgradeStatus",
 		"Runtime upscaler capability and actual dispatch status: available, confirmedProvider, selected, enabledAtBoot, lastFramePath, contextProvider, and unavailableReason. Availability requires a device query and successful context creation; lastFramePath stays pending until dispatch. Change fsr4RuntimeEnable through openshaders.feature and restart to apply the selection.",
 		([](const Feature* self, const json&) -> json {
 			const auto& upscaling = *static_cast<const Upscaling*>(self);
@@ -660,8 +715,12 @@ void Upscaling::RegisterUxActions()
 		}));
 
 	FEATURE_QUERY("neuralRenderingStatus",
-		"Neural Rendering state: the status line the settings panel shows, the failure latch, the accepted nvngx_dlssnr.dll version, render size and eyes, per-eye NGX result codes, and how many frames it has applied. context is which situation profile is in effect right now (normal or dialogue), dialogueOnly reports whether the normal profile is suspended (settings.neuralRenderingContexts.normal.run false), and dialogueOpen whether the dialogue menu is open right now, so a state of kSuspended is explained by dialogueOnly on with dialogueOpen false. Each situation has a profile at settings.neuralRenderingContexts.normal and settings.neuralRenderingContexts.dialogue with run (false suspends the pass), scope (0 same as normal, 1 everything, 2 skin hair and eyes, 3 skin hair eyes and foliage) overriding the material scope, and region (0 same as normal, 1 full frame) dropping the tracked-actor crop. Also the verdict for the runtime on disk as runtimeAvailability (Ready, Missing, UnsupportedVersion or UnvalidatedBuild), the version it found in runtimeVersion, why it was refused in runtimeDetail, and whether the pass would load it right now in runtimeLoadable -- developer mode loads a refused build outside a missing file. The material strength is reported as materialStrength (the saved switch at settings.neuralRenderingTuning.materialStrength), materialStrengthAvailable (the deferred material lane is present and the graded protection has not been rejected or degraded), materialStrengthActive (it was bound on the last evaluate), materialStrengthValues (the active strengths in NeuralRenderingCategory id order: None, Skin, Hair, Eyes, Foliage, Landscape, Cloth, Metal) and materialEdgeSoftness (the active edge-softness radius in pixels). Those strengths come from settings.neuralRenderingTuning.strengthSkin, strengthHair, strengthEyes, strengthFoliage, strengthLandscape, strengthCloth, strengthMetal and strengthOther, each 0 to 1, and the radius from strengthEdgeSoftness, 0 to 4 pixels. The material map debug view is settings.neuralRenderingTuning.showMaterialMap (reported here as showMaterialMap), with materialMapMode 0 for category colours or 1 for the strength ramp, and materialMapFilter a bitmask of the categories it draws (bit 0 None, 1 Skin, 2 Hair, 3 Eyes, 4 Foliage, 5 Landscape, 6 Cloth, 7 Metal; the low eight bits only, all on by default). allowUnverifiedRuntime (default false, settings.neuralRenderingTuning.allowUnverifiedRuntime) loads a 310.8.x or 310.9.x nvngx_dlssnr.dll outside the pinned builds (state UnvalidatedBuild) without developer mode; its output is unverified. settings.neuralRenderingTuning.runtimeVariant (empty by default) names a subfolder of the Streamline directory whose nvngx_dlssnr.dll to load instead of the one in the folder itself; changing it unloads the running runtime and loads the other, runtimeBuilds lists the default file and each subfolder build with its version and verdict (variant, version, availability, selected), and runtimeVersion, runtimeAvailability and runtimeDetail describe the selected build. settings.neuralRenderingTuning.modelPreset (0 the original 310.8 network, the default; 1 the newest, faster network a 310.9 runtime ships; ignored by a 310.8 runtime) is reported as modelPreset and recreates the model when changed. parallelEyes (default true, VR only) evaluates the second eye on a second compute queue; it falls back to one queue by itself. The crop NR last evaluated is reported in openshaders.feature diagnostics as neuralRegion and neuralActorBounds, with which sources chose it in neuralRegionSource (none, actor, fovea or both). Eye-staggered gain reuse is settings.neuralRenderingTuning.skipFrameReuse (VR only, off by default, on in the Performance profile), reported here as skipFrameReuse, with skipFrameReuseActive true only while it actually runs (false on flat or while frame generation is active); settings.neuralRenderingTuning.skipFrameGapMode (0 notify the model by doubling its motion, 1 reset the eye's history) is reported as skipFrameGapMode. settings.neuralRenderingTuning.crossEyeGain (default true; with the stagger) lets a reused pixel whose own earlier gain was rejected take the other eye's model gain of the same frame, and is reported as crossEyeGain. eyeReuse is per eye whether this frame reused its stored gain instead of running the model (left then right; both false on flat or with the stagger off), and modelFrames/reuseFrames count eye-evaluations and eye-reuses since startup, so one frame of a running stagger adds one to each. The model scale settings.neuralRenderingTuning.modelScale (0.25 to 1, developer-only, default 1) runs the model below the eye size and upsamples its tone gain onto the eye; modelGuidedUpsample weights that upsample by brightness similarity, and modelScale is reported here. settings.neuralRenderingTuning.sbsEvaluate (developer mode and VR only, off by default) evaluates both eyes as one side-by-side image on a single instance, which takes precedence over the stagger and combines with the model scale. With a model scale or sbsEvaluate on, modelVerify also evaluates each eye alone at full size every frame so a verify capture can compare the two, and mirrorEyes feeds eye 0's inputs to both eyes; both are developer-only measurement aids. Params: none.",
+		"Neural Rendering state: the status line the settings panel shows, the failure latch, the accepted nvngx_dlssnr.dll version, render size and eyes, per-eye NGX result codes, and how many frames it has applied. context is which situation profile is in effect right now (normal or dialogue), dialogueOnly reports whether the normal profile is suspended (settings.neuralRenderingContexts.normal.run false), and dialogueOpen whether the dialogue menu is open right now, so a state of kSuspended is explained by dialogueOnly on with dialogueOpen false. Each situation has a profile at settings.neuralRenderingContexts.normal and settings.neuralRenderingContexts.dialogue with run (false suspends the pass), scope (0 same as normal, 1 everything, 2 skin hair and eyes, 3 skin hair eyes and foliage) overriding the material scope, and region (0 same as normal, 1 full frame) dropping the tracked-actor crop. Also the verdict for the runtime on disk as runtimeAvailability (Ready, Missing, UnsupportedVersion or UnvalidatedBuild), the version it found in runtimeVersion, why it was refused in runtimeDetail, and whether the pass would load it right now in runtimeLoadable -- developer mode loads a refused build outside a missing file. The material strength is reported as materialStrength (the saved switch at settings.neuralRenderingTuning.materialStrength), materialStrengthAvailable (the deferred material lane is present and the graded protection has not been rejected or degraded), materialStrengthActive (it was bound on the last evaluate), materialStrengthValues (the active strengths in NeuralRenderingCategory id order: None, Skin, Hair, Eyes, Foliage, Landscape, Cloth, Metal) and materialEdgeSoftness (the active edge-softness radius in pixels). Those strengths come from settings.neuralRenderingTuning.strengthSkin, strengthHair, strengthEyes, strengthFoliage, strengthLandscape, strengthCloth, strengthMetal and strengthOther, each 0 to 1, and the radius from strengthEdgeSoftness, 0 to 4 pixels. The material map debug view is settings.neuralRenderingTuning.showMaterialMap (reported here as showMaterialMap), with materialMapMode 0 for category colours or 1 for the strength ramp, and materialMapFilter a bitmask of the categories it draws (bit 0 None, 1 Skin, 2 Hair, 3 Eyes, 4 Foliage, 5 Landscape, 6 Cloth, 7 Metal; the low eight bits only, all on by default). allowUnverifiedRuntime (default false, settings.neuralRenderingTuning.allowUnverifiedRuntime) loads a 310.8.x or 310.9.x nvngx_dlssnr.dll outside the pinned builds (state UnvalidatedBuild) without developer mode; its output is unverified. settings.neuralRenderingTuning.runtimeVariant (empty by default) names a subfolder of the Streamline directory whose nvngx_dlssnr.dll to load instead of the one in the folder itself; changing it unloads the running runtime and loads the other, runtimeBuilds lists the default file and each subfolder build with its version and verdict (variant, version, availability, selected), and runtimeVersion, runtimeAvailability and runtimeDetail describe the selected build. settings.neuralRenderingTuning.modelPreset (0 the original 310.8 network, the default; 1 the newest, faster network a 310.9 runtime ships; ignored by a 310.8 runtime) is reported as modelPreset and recreates the model when changed. parallelEyes (default true, VR only) evaluates the second eye on a second compute queue; it falls back to one queue by itself. The crop NR last evaluated is reported in openshaders.feature diagnostics as neuralRegion and neuralActorBounds, with which sources chose it in neuralRegionSource (none, actor, fovea or both). Eye-staggered gain reuse is settings.neuralRenderingTuning.skipFrameReuse (VR only, off by default, on in the Performance profile), reported here as skipFrameReuse, with skipFrameReuseActive true only while it actually runs (false on flat or while frame generation is active); settings.neuralRenderingTuning.skipFrameGapMode (0 notify the model by doubling its motion, 1 reset the eye's history) is reported as skipFrameGapMode. settings.neuralRenderingTuning.crossEyeGain (default true; with the stagger) lets a reused pixel whose own earlier gain was rejected take the other eye's model gain of the same frame, and is reported as crossEyeGain. eyeReuse is per eye whether this frame reused its stored gain instead of running the model (left then right; both false on flat or with the stagger off), and modelFrames/reuseFrames count eye-evaluations and eye-reuses since startup, so one frame of a running stagger adds one to each. The model scale settings.neuralRenderingTuning.modelScale (0.25 to 1, developer-only, default 1) runs the model below the eye size and upsamples its tone gain onto the eye; modelGuidedUpsample weights that upsample by brightness similarity, and modelScale is reported here. settings.neuralRenderingTuning.sbsEvaluate (developer mode and VR only, off by default) evaluates both eyes as one side-by-side image on a single instance, which takes precedence over the stagger and combines with the model scale. With a model scale or sbsEvaluate on, modelVerify also evaluates each eye alone at full size every frame so a verify capture can compare the two, and mirrorEyes feeds eye 0's inputs to both eyes; both are developer-only measurement aids. capability is what the runtime reports about itself at its last creation: queried (a creation has read it), available and needsUpdatedDriver (each meaningful only when its reportsAvailability or reportsDriver is true, since the populated parameter block may not carry them), minDriverMajor, minDriverMinor, optimizationLevel and developmentBranch (each null when the runtime does not report it), and hasMemory with memoryBytes (the model allocation, when the runtime answers its stats callback). Params: none.",
 		NeuralRenderingStatus);
+
+	FEATURE_QUERY("gazeStatus",
+		"Eye-tracked foveation gaze: whether Follow eye gaze is on (enabled), the selected source mode (sourceMode: 0 SteamVR then OSC, 1 SteamVR only, 2 OSC only), the source that supplied the last sample (source: kNone, kSteamVr or kOsc), whether that sample was valid (valid), the per-eye gaze centres in normalized eye UV with y down (centres, left then right), whether the gaze override is currently placing the crop (active), the lifetime count of valid frames (validFrames) and settings.gazeRecentreThreshold. The OSC listener reports oscListening, oscPort, oscPackets, oscBindFailed and lastOscAddress; a bind failure is logged once and not retried until the port changes. Settings live under foveatedRender in openshaders.feature: gazeFollow, gazeSource, gazeOscPort, gazeRecentreThreshold and gazeOffsetX/gazeOffsetY. Params: none.",
+		GazeStatus);
 
 	FEATURE_COMMAND("retryNeuralRendering",
 		"Queue one Neural Rendering retry: the same flag the Retry NR button sets. The next enabled world frame retires and rebuilds a failed runtime, and the request resets history; a healthy runtime is not rebuilt. Params: none.",
@@ -685,41 +744,41 @@ void Upscaling::OnBeforeInputPoll()
 void Upscaling::DrawSettings()
 {
 	ApplyOpenCompositeUpscalingBlocker();
-	if (!ImGui::BeginTabBar("##UpscalingTabs"))
+	if (!Util::BeginPillTabBar("##UpscalingTabs"))
 		return;
 
-	if (ImGui::BeginTabItem(GetDisplayName().c_str())) {
+	if (Util::BeginPillTabItem(GetDisplayName().c_str())) {
 		DrawUpscalingSettings();
-		ImGui::EndTabItem();
+		Util::EndPillTabItem();
 	}
 
-	if (!globals::game::isVR && ImGui::BeginTabItem(T(TKEY("frame_generation"), "Frame Generation"))) {
+	if (!globals::game::isVR && Util::BeginPillTabItem(T(TKEY("frame_generation"), "Frame Generation"))) {
 		DrawFrameGenerationSettings();
-		ImGui::EndTabItem();
+		Util::EndPillTabItem();
 	}
 
 	const bool reflexSupported = streamline.reflexSupportedOnCurrentAdapter || streamlineDX12.reflexSupportedOnCurrentAdapter;
-	if (reflexSupported && ImGui::BeginTabItem(T(TKEY("nvidia_reflex"), "NVIDIA Reflex"))) {
+	if (reflexSupported && Util::BeginPillTabItem(T(TKEY("nvidia_reflex"), "NVIDIA Reflex"))) {
 		DrawReflexSettings();
-		ImGui::EndTabItem();
+		Util::EndPillTabItem();
 	}
 
-	if (globals::game::isVR && ImGui::BeginTabItem(T(TKEY("tab_foveation"), "Foveation"))) {
+	if (globals::game::isVR && Util::BeginPillTabItem(T(TKEY("tab_foveation"), "Foveation"))) {
 		DrawFoveationControls();
-		ImGui::EndTabItem();
+		Util::EndPillTabItem();
 	}
 
-	if (ImGui::BeginTabItem(std::format("{}###NeuralRendering", Util::AppendReleaseStageTag(T(TKEY("tab_neural_rendering"), "Neural Rendering"), Feature::ReleaseStage::Alpha)).c_str())) {
+	if (Util::BeginPillTabItem(std::format("{}###NeuralRendering", Util::AppendReleaseStageTag(T(TKEY("tab_neural_rendering"), "Neural Rendering"), Feature::ReleaseStage::Alpha)).c_str())) {
 		neuralRendering.DrawSettings(settings.neuralRenderingEnabled, settings.neuralRenderingContexts, settings.neuralRenderingTuning);
-		ImGui::EndTabItem();
+		Util::EndPillTabItem();
 	}
 
-	if (ImGui::BeginTabItem(T(TKEY("backend_diagnostics"), "Backend Diagnostics"))) {
+	if (Util::BeginPillTabItem(T(TKEY("backend_diagnostics"), "Backend Diagnostics"))) {
 		DrawBackendDiagnostics();
-		ImGui::EndTabItem();
+		Util::EndPillTabItem();
 	}
 
-	ImGui::EndTabBar();
+	Util::EndPillTabBar();
 }
 
 void Upscaling::DrawUpscalingSettings()
@@ -1230,9 +1289,9 @@ void Upscaling::LoadSettings(json& o_json)
 		logger::warn("[Upscaling] Loaded upscaleMethod {} out of range, clamping to {}", settings.upscaleMethod, enumCount ? enumCount - 1 : 0);
 		settings.upscaleMethod = enumCount ? enumCount - 1 : 0;
 	}
-	if (settings.upscaleMethodNoDLSS >= static_cast<uint>(enumCount)) {
-		logger::warn("[Upscaling] Loaded upscaleMethodNoDLSS {} out of range, clamping to {}", settings.upscaleMethodNoDLSS, enumCount ? enumCount - 1 : 0);
-		settings.upscaleMethodNoDLSS = enumCount ? enumCount - 1 : 0;
+	if (settings.upscaleMethodNoDLSS > static_cast<uint>(UpscaleMethod::kFSR)) {
+		logger::warn("[Upscaling] Loaded upscaleMethodNoDLSS {} out of range, clamping to {}", settings.upscaleMethodNoDLSS, static_cast<uint>(UpscaleMethod::kFSR));
+		settings.upscaleMethodNoDLSS = static_cast<uint>(UpscaleMethod::kFSR);
 	}
 	if (settings.vrRenderScale != 0.0f &&
 		(!std::isfinite(settings.vrRenderScale) ||
@@ -1402,6 +1461,49 @@ struct SSRPostRender_Hook
 };
 #endif
 
+struct FaceGen_CopyRenderTarget
+{
+	static RE::NiTexture::RendererData* thunk(RE::BSGraphics::Renderer* a_renderer, RE::RENDER_TARGET a_target, D3D11_USAGE a_usage)
+	{
+		auto source = a_renderer->GetRuntimeData().renderTargets[a_target].texture;
+		if (!source) {
+			logger::error("[Upscaling] FaceGen texture copy skipped: missing source render target");
+			return nullptr;
+		}
+
+		// The render target manager is inline, while CommonLib's getter dereferences it.
+		static REL::Relocation<RE::BSGraphics::RenderTargetManager*> renderTargetManager{ REL::RelocationID(524970, 411451) };
+		constexpr size_t kVRRenderTargetPropertiesSize = 0x28;
+		const size_t propertyStride = globals::game::isVR ? kVRRenderTargetPropertiesSize : sizeof(RE::BSGraphics::RenderTargetProperties);
+		const auto& properties = *reinterpret_cast<const RE::BSGraphics::RenderTargetProperties*>(
+			renderTargetManager.address() + static_cast<size_t>(a_target) * propertyStride);
+		using CreateTexture = RE::NiTexture::RendererData*(RE::BSGraphics::Renderer*, uint32_t, uint32_t, const void*, D3D11_USAGE, DXGI_FORMAT, bool);
+		static REL::Relocation<CreateTexture> createTexture{ REL::VariantID(75511, 77303, 0xDBFCF0) };
+		auto texture = createTexture(a_renderer, properties.width, properties.height, nullptr, a_usage, DXGI_FORMAT_R8G8B8A8_UNORM, false);
+		if (!texture) {
+			logger::error("[Upscaling] FaceGen texture allocation failed ({}x{}, usage {})", properties.width, properties.height, static_cast<uint32_t>(a_usage));
+			return nullptr;
+		}
+
+		if (!texture->texture || (a_usage != D3D11_USAGE_STAGING && !texture->resourceView)) {
+			logger::error("[Upscaling] FaceGen texture allocation returned incomplete resources ({}x{})", properties.width, properties.height);
+			if (texture->resourceView)
+				texture->resourceView->Release();
+			if (texture->texture)
+				texture->texture->Release();
+			delete texture;
+			return nullptr;
+		}
+
+		Util::SetResourceName(Util::AsReal(texture->texture), "Upscaling::FaceGen Copy");
+		if (texture->resourceView)
+			Util::SetResourceName(Util::AsReal(texture->resourceView), "Upscaling::FaceGen Copy SRV");
+		globals::d3d::context->CopyResource(Util::AsReal(texture->texture), Util::AsReal(source));
+		return texture;
+	}
+	static inline REL::Relocation<decltype(thunk)> func;
+};
+
 void Upscaling::PostPostLoad()
 {
 	// Guard before foveatedRender.PostPostLoad() so its hooks also stand down.
@@ -1431,7 +1533,14 @@ void Upscaling::PostPostLoad()
 	stl::write_thunk_call<Main_PostProcessing>(REL::RelocationID(100430, 107148).address() + REL::Relocate(0x1F0, 0x1E7, 0x206));
 
 	// Patches facegen texture generation to not use dynamic resolution
-	stl::detour_thunk<BSFaceGenManager_UpdatePendingCustomizationTextures>(REL::RelocationID(26455, 27041));
+	const auto faceGenUpdate = REL::RelocationID(26455, 27041).address();
+	const auto faceGenCopy = faceGenUpdate + Util::VersionedRelocation::Select(0x119, 0x187, 0x19E);
+	if (Util::VersionedRelocation::IsCallTo(faceGenCopy, REL::VariantID(75524, 77318, 0xDC08A0).address())) {
+		stl::write_thunk_call<FaceGen_CopyRenderTarget>(faceGenCopy);
+	} else {
+		logger::warn("[Upscaling] FaceGen texture allocation guard not installed: unexpected copy call");
+	}
+	stl::detour_thunk<BSFaceGenManager_UpdatePendingCustomizationTextures>(faceGenUpdate);
 
 	// Patches precipitation camera to not use dynamic resolution
 	stl::write_thunk_call<Main_RenderPrecipitation>(REL::RelocationID(35560, 36559).address() + REL::Relocate<std::uintptr_t>(0x3A1, REL::Module::IsAtLeast(REL::Version(1, 7, 99, 0)) ? 0x3BF : 0x3A1, 0x2FA));
@@ -2575,7 +2684,9 @@ bool Upscaling::IsFrameGenerationActive() const
 bool Upscaling::ShouldPrepareFrameGeneration() const
 {
 	auto* state = globals::state;
-	const bool menuOpen = state && state->IsPausedOrMenuOpen(globals::game::ui);
+	auto* menu = globals::menu;
+	const bool menuOpen = (state && state->IsPausedOrMenuOpen(globals::game::ui)) ||
+	                      (menu && menu->ShouldSwallowInput() && !menu->IsPreviewFlying());
 	return IsFrameGenerationDx12PathActive() && settings.frameGenerationMode && (settings.frameGenerationAllowInMenus || !menuOpen);
 }
 
@@ -2632,11 +2743,6 @@ void Upscaling::LoadUpscalingSDKs()
 HANDLE Upscaling::GetFrameLatencyWaitableObject() const
 {
 	return dx12SwapChain.GetFrameLatencyWaitableObject();
-}
-
-float Upscaling::GetFrameTime() const
-{
-	return dx12SwapChain.GetFrameTime();
 }
 
 // Backend interface methods
@@ -2875,7 +2981,11 @@ void Upscaling::Upscale()
 	else
 		menuCameraMVsValid = false;
 
-	{
+	// The foveated route encodes its own masks, so the standard encode only runs when it is skipped or fails.
+	const bool foveatedRouteCandidate = FoveatedRenderImpl::Bridge::IsRouteActive() && globals::game::isVR &&
+	                                    !(globals::state && globals::state->IsMainOrLoadingMenuOpen());
+
+	auto encodeTextures = [&]() {
 		CS_GPU_PASS("Upscaling::EncodeTextures");
 
 		// VR: ensure per-eye intermediate textures exist before the dispatch writes into them
@@ -2948,7 +3058,10 @@ void Upscaling::Upscale()
 
 		ID3D11ComputeShader* shader = nullptr;
 		context->CSSetShader(shader, nullptr, 0);
-	}
+	};
+
+	if (!foveatedRouteCandidate)
+		encodeTextures();
 
 	{
 		CS_GPU_PASS("Upscaling::Upscale");
@@ -2959,12 +3072,12 @@ void Upscaling::Upscale()
 		// standard path on failure. Main/loading menus must stay off: their backdrop uses
 		// synthesized camera MVs or a per-frame reset that the subrect history cannot follow.
 		auto tryFoveatedRoute = [&](ID3D11Resource* a_depth, const char* a_methodLabel) -> bool {
-			auto* st = globals::state;
-			const bool menuBackdrop = st && st->IsMainOrLoadingMenuOpen();
-			if (!(FoveatedRenderImpl::Bridge::IsRouteActive() && globals::game::isVR && !menuBackdrop))
+			if (!foveatedRouteCandidate)
 				return false;
-			if (!FoveatedRenderImpl::Preprocess::EncodeUpscalingTextures(*this))
+			if (!FoveatedRenderImpl::Preprocess::EncodeUpscalingTextures(*this)) {
+				encodeTextures();
 				return false;
+			}
 			const bool routeHandled = FoveatedRenderImpl::Core::ExecuteFoveatedRoute(streamline,
 				Util::AsReal(main.texture), a_depth,
 				reactiveMaskTexture->resource.get(),
@@ -2972,6 +3085,7 @@ void Upscaling::Upscale()
 				motionVectorCopyTexture->resource.get());
 			if (!routeHandled) {
 				logger::warn("[FOVEATED] route preflight failed — falling through to standard {} path", a_methodLabel);
+				encodeTextures();
 			}
 			return routeHandled;
 		};

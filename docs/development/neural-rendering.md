@@ -51,13 +51,24 @@ The controls persist under `Upscaling.neuralRenderingTuning`:
 | Local Tone Strength      | `localToneStrength`      | 0–2                         | 1.0        | `DLSSNR.LocalToneStrength`      |
 | Local Structure Strength | `localStructureStrength` | 0–2                         | 1.0        | `DLSSNR.LocalStructureStrength` |
 | Skin Structure Strength  | `skinStructureStrength`  | -1–2 (-1 displays Auto)     | -1         | `DLSSNR.SkinStructureStrength`  |
+| Colour Strength          | `colorStrength`          | 0–1                         | 0          | none (composite only)           |
 | Use Auto Mask            | `useAutoMask`            | Off / On                    | On         | `DLSSNR.UseAutoMask`            |
 
-All six values are written in `NR::Runtime::Evaluate()`. Committing a tuning edit
+Colour Strength is not an evaluation parameter: the composite applies
+`ColorStrength` times the model's per-channel colour shift (its change in each
+channel minus the luminance-weighted mean, capped at one stop) on top of the
+brightness gain, scaled by the category strength and the dynamic-range
+protection. At 0 the game's hue and chroma are untouched. The shift is stored
+with the gain history, so frames that reuse a gain also reuse the colour.
+The shift is rescaled in linear light to leave luminance alone and fades out as the model's
+display proxy approaches clipping (peak channel 0.85 to 0.98), because a clipped proxy carries no
+usable colour offset. It is multiplicative, so HDR range above the proxy's white is preserved.
+
+The six evaluation parameters are written in `NR::Runtime::Evaluate()`. Committing a tuning edit
 recreates the Feature 18 handles because the runtime can latch appearance tuning
 during creation. Existing config values are preserved when present. Missing or
 invalid values use the defaults above and are bounded to the documented ranges.
-**Restore NR Defaults** resets all six controls; **Reset NR History** invalidates
+**Restore NR Defaults** resets all seven controls; **Reset NR History** invalidates
 both eye histories without changing tuning.
 
 Developer mode also exposes **Use resolution-scaled NR motion**. It is a
@@ -83,24 +94,24 @@ tuning above. `NR::Context::Resolve` picks the situation from the game state eac
 reports whether it suspends the pass and whether history must be reset;
 `NR::Context::EffectiveTuning` applies the situation's overrides to the tuning.
 
--   **Only in dialogue** (the normal profile's `run` false, the dialogue profile's true; default
-    off) evaluates NR only while `RE::DialogueMenu` is open and suspends the pass the rest of
-    the time. A suspended pass keeps its resources, its runtime and its NGX features, so the
-    frame renders exactly as it does with NR off and the next dialogue frame resumes without a
-    rebuild. Shown as _Waiting for dialogue_, and in DevBench's `neuralRenderingStatus` as
-    `state` `kSuspended` with `dialogueOnly` and `dialogueOpen`.
--   **In dialogue, apply Neural Rendering to** (`dialogue.scope`: 0 same as normal, 1
-    everything, 2 skin hair and eyes, 3 skin hair eyes and foliage) overrides the material
-    scope while dialogue is open. A scope override in any profile binds the by-material lane in
-    every situation, at a cost of about 0.04 ms, because Feature 18 latches the `UIAlpha`
-    binding at creation: a situation change must never rebuild the eye features. A profile
-    with no override keeps the selection the by-material setting gives it; when that setting
-    is off, the lane carries all-ones strengths, which leaves every pixel unprotected, so
-    that frame is unchanged.
--   **In dialogue, crop** (`dialogue.region`: 0 same as normal, 1 full frame) drops the
-    tracked-actor crop while dialogue is open and evaluates the whole view. It needs **Limit to
-    Tracked Actor** on. Without an override the crop is untouched: in dialogue the tracked
-    actor is normally the speaker, so the crop keeps following it.
+- **Only in dialogue** (the normal profile's `run` false, the dialogue profile's true; default
+  off) evaluates NR only while `RE::DialogueMenu` is open and suspends the pass the rest of
+  the time. A suspended pass keeps its resources, its runtime and its NGX features, so the
+  frame renders exactly as it does with NR off and the next dialogue frame resumes without a
+  rebuild. Shown as _Waiting for dialogue_, and in DevBench's `neuralRenderingStatus` as
+  `state` `kSuspended` with `dialogueOnly` and `dialogueOpen`.
+- **In dialogue, apply Neural Rendering to** (`dialogue.scope`: 0 same as normal, 1
+  everything, 2 skin hair and eyes, 3 skin hair eyes and foliage) overrides the material
+  scope while dialogue is open. A scope override in any profile binds the by-material lane in
+  every situation, at a cost of about 0.04 ms, because Feature 18 latches the `UIAlpha`
+  binding at creation: a situation change must never rebuild the eye features. A profile
+  with no override keeps the selection the by-material setting gives it; when that setting
+  is off, the lane carries all-ones strengths, which leaves every pixel unprotected, so
+  that frame is unchanged.
+- **In dialogue, crop** (`dialogue.region`: 0 same as normal, 1 full frame) drops the
+  tracked-actor crop while dialogue is open and evaluates the whole view. It needs **Limit to
+  Tracked Actor** on. Without an override the crop is untouched: in dialogue the tracked
+  actor is normally the speaker, so the crop keeps following it.
 
 History is reset once when a frame leaves a suspension and when it enters a situation whose
 scope or crop differs from the previous one, so NR never blends across them.
@@ -139,6 +150,12 @@ such as a gaze-driven one, adds a sibling namespace with its own
 values rather than a new mechanism. With the toggle off, or with no actor
 tracked, the crop is the whole frame and NR evaluates exactly as it does
 without it.
+
+A crop that moves keeps NR's temporal history. NR's history lives in crop-local coordinates, so each eye's motion
+vectors get the crop origin's move since the model last ran added to them (`MotionOffsetCS.hlsl`, applied to a
+private copy so the gain reuse still reads the game's motion). The history resets only when the crop appears or
+disappears, resizes by more than one alignment step, or jumps by more than half its extent. Side-by-side
+evaluation keeps the reset-on-move rule.
 
 The crop controls below only act through a tracked crop, so they follow that
 toggle: **Show Region Overlay**, **Crop Fit** and **Track Multiple Characters**
@@ -283,34 +300,34 @@ the fovea clip also narrowed the crop the last frame evaluated.
 
 ## Resource and temporal contract
 
--   Color: a bounded display-referred proxy in an RGBA16 float carrier at
-    render-eye resolution. The original scene-linear `kMAIN` RGB and alpha are
-    retained separately for luminance-ratio writeback.
--   Depth: the existing upscaling encoder reads the engine depth SRV,
-    including VR's R24 depth view, and writes the device depth to R32 float
-    unchanged: inverted (1 is near) when Reverse Z is active. Depth is not
-    linearized.
--   Motion: the same encoder's undilated path writes RG16 float, preserving
-    correspondence with the center-pixel depth guide. The default Feature 18
-    contract converts normalized eye-UV displacement to NR input pixels using
-    the input width and height independently as motion-vector scales. The
-    developer A/B switch can instead send identity scales. Reset frames submit
-    zero motion because their previous history is invalid.
--   Frame data: diagnostics observe cached camera position, view direction, and
-    projection changes. These inferred cuts do not reset production history.
-    Production evaluation does not supply camera aliases to Feature 18. When
-    the developer **Feed historical camera parameters** option is enabled, the
-    current jitter, frame time, world-to-view matrix, and view-to-clip matrix
-    are supplied for the diagnostic comparison. Before a history reset, prior
-    NR GPU work is retired. Frames retaining history keep GPU-only interop
-    ordering.
--   Loading transitions, skipped world frames, enable changes, shader
-    invalidation, and resource recreation invalidate history. Ordinary UI menus
-    continue evaluating NR when the world rendered that frame; UI composition
-    remains later in the frame and is not passed through Feature 18.
-    Resolution, format, eye-count changes, or explicit resource recreation retire
-    GPU work and recreate the eye resources and NGX instances together. Changing
-    only the engine texture pointer does not recreate NR.
+- Color: a bounded display-referred proxy in an RGBA16 float carrier at
+  render-eye resolution. The original scene-linear `kMAIN` RGB and alpha are
+  retained separately for luminance-ratio writeback.
+- Depth: the existing upscaling encoder reads the engine depth SRV,
+  including VR's R24 depth view, and writes the device depth to R32 float
+  unchanged: inverted (1 is near) when Reverse Z is active. Depth is not
+  linearized.
+- Motion: the same encoder's undilated path writes RG16 float, preserving
+  correspondence with the center-pixel depth guide. The default Feature 18
+  contract converts normalized eye-UV displacement to NR input pixels using
+  the input width and height independently as motion-vector scales. The
+  developer A/B switch can instead send identity scales. Reset frames submit
+  zero motion because their previous history is invalid.
+- Frame data: diagnostics observe cached camera position, view direction, and
+  projection changes. These inferred cuts do not reset production history.
+  Production evaluation does not supply camera aliases to Feature 18. When
+  the developer **Feed historical camera parameters** option is enabled, the
+  current jitter, frame time, world-to-view matrix, and view-to-clip matrix
+  are supplied for the diagnostic comparison. Before a history reset, prior
+  NR GPU work is retired. Frames retaining history keep GPU-only interop
+  ordering.
+- Loading transitions, skipped world frames, enable changes, shader
+  invalidation, and resource recreation invalidate history. Ordinary UI menus
+  continue evaluating NR when the world rendered that frame; UI composition
+  remains later in the frame and is not passed through Feature 18.
+  Resolution, format, eye-count changes, or explicit resource recreation retire
+  GPU work and recreate the eye resources and NGX instances together. Changing
+  only the engine texture pointer does not recreate NR.
 
 The runtime receives independent depth and motion subrects and X/Y motion scales
 from the producer. It clamps each subrect against its own D3D12 allocation before
@@ -335,24 +352,18 @@ the version gate bounds this implementation to its observed ABI.
 ## Current Feature 18 contract
 
 The runtime creates one persistent Feature 18 instance per rendered eye using
-the observed 310.8.x private ABI. It creates a same-resolution pass with
-`DLSSNR.Upscaling=0u`, `DLSSNR.Scale=1.0f`,
-`DLSSNR.ScalingRatio=1.0f`, and `DLSSNR.Hint.Render.Preset=0u`.
-The creation flags are `IsHDR | DoSharpening | AutoExposure` (`0x61`) in both
-`Feature_Flags` and `NVSDK_NGX_Parameter_Feature_Flags`. The private selectors
-are `DLSSNR.AutoExposure=1u`, `DLSSNR.Hdr=1u`, and `DLSSNR.SDR=0u`.
-`InPreExposure`, `InExposureScale`, `NVSDK_NGX_Parameter_PreExposure`, and
-`NVSDK_NGX_Parameter_ExposureScale` are initialized to `1.0f`. Parameters are
+the observed 310.8.x D3D12 interface. It creates a same-resolution pass with
+`DLSSNR.Width`, `DLSSNR.Height`, `DLSSNR.ScalingRatio=1.0f`, and
+`DLSSNR.Hint.Render.Preset`. Parameters are
 populated through `NVSDK_NGX_D3D12_PopulateParameters_Impl` before creation.
 The creation contract also supplies `DLSSNR.ControlMask=nullptr`,
 `DLSSNR.UseAutoMask`, and `DLSSNR.UICorrection=1u`.
 
-The HDR-selected model contract does not mean that unbounded scene-linear
-values are sent to Feature 18. The input is the bounded display-referred proxy
-described below. The original scene-linear frame remains separate and is used
-for reconstruction after model evaluation. This D3D12 private ABI is observed
-rather than officially documented; successful creation and evaluation do not by
-themselves establish image quality or temporal correctness.
+Unbounded scene-linear values are not sent to Feature 18. The input is the bounded
+display-referred proxy described below. The original scene-linear frame remains
+separate and is used for reconstruction after model evaluation. This D3D12 interface
+is observed rather than officially documented; successful creation and evaluation do
+not by themselves establish image quality or temporal correctness.
 
 `DLSSNR.DepthInverted` follows the Reverse Z-Buffer feature, which is restart-gated, so
 the depth guide's convention never changes while the game runs. Frame time and jitter
@@ -365,9 +376,19 @@ recreate the persistent eye handles. A contract change must likewise retire
 queued GPU work before releasing the handles and recreate both eye instances
 when it changes creation-latched parameters.
 
-The runtime discovers the private float setter slot from the populated parameter
-object before writing Feature 18 floats. Unsigned and resource parameters use
-the corresponding private ABI slots rather than the public SDK overloads.
+Unsigned, float and resource parameters are written through the public
+`NVSDK_NGX_Parameter::Set` overloads. The runtime sets only parameter names the
+`nvngx_dlssnr.dll` builds contain as strings; a name they do not contain is not written.
+
+After each creation the runtime reads `DLSSNR.Available`, `DLSSNR.NeedsUpdatedDriver`,
+`DLSSNR.MinDriverVersionMajor` and `Minor`, and calls the `DLSSNRGetStatsCallback` the
+parameter block registers, which reports the model allocation, the optimization level and
+whether the snippet is a development branch. `Available` and `NeedsUpdatedDriver` are
+recorded as present or absent, because the populated block may not carry them; the driver
+version, optimization level and branch flag are reported as null when the runtime does not
+answer them. A recreation of the model refreshes the snapshot. The values
+appear in the settings panel and in the `capability` object of `neuralRenderingStatus`; none
+of them gates the pass.
 
 The public [DLSS5VKLayer creation code](https://github.com/bmitch87/DLSS5VKLayer/blob/main/core/ngx_snippet.cpp#L509-L523)
 and [HDR input description](https://github.com/bmitch87/DLSS5VKLayer#hdr-input)
