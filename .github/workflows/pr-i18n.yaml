@@ -33,6 +33,13 @@ jobs:
             - name: Check en.json is up to date
               run: python tools/extract-i18n.py --check
 
+            - name: Report translation coverage
+              id: coverage
+              continue-on-error: true
+              run: |
+                  python tools/i18n-coverage.py
+                  python tools/i18n-coverage.py --locale zh_CN --check
+
             - name: Validate translation file formats
               run: |
                   python -c "

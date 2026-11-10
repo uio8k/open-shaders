@@ -2301,7 +2301,7 @@ void NeuralRendering::DrawSettings(bool& enabled, NR::Context::Profiles& context
 			ImGui::TextUnformatted(T(TKEY("mirror_eyes_tooltip"),
 				"Feeds the left eye's inputs to both eyes, to check that the two eyes get the same result. The right eye's picture is wrong while this is on."));
 		ImGui::SeparatorText(T(TKEY("developer_diagnostics"), "Diagnostics"));
-		if (ImGui::Checkbox("Use resolution-scaled NR motion", &impl->useResolutionMotionScale))
+		if (ImGui::Checkbox(T(TKEY("use_resolution_motion"), "Use resolution-scaled NR motion"), &impl->useResolutionMotionScale))
 			resetHistory = true;
 		diagnostics.DrawSettings();
 		ImGui::TreePop();

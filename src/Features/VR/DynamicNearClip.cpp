@@ -494,22 +494,22 @@ void VRDynamicNearClip::DrawValues()
 		return;
 	ImGui::TextUnformatted(status);
 	if (controlledCamera)
-		ImGui::Text("Near %.4f | target %.4f", appliedNear, targetNear);
+		ImGui::Text(T("feature.vr.near_clip.near_and_target", "Near %.4f | target %.4f"), appliedNear, targetNear);
 	else
-		ImGui::TextUnformatted("Near override inactive: using the engine camera");
-	ImGui::Text("Source near L/R: %.6g / %.6g", inputNear[0], inputNear[1]);
-	ImGui::Text("Source far L/R: %.6g / %.6g", inputFar[0], inputFar[1]);
-	ImGui::Text("Source minimum %.6g | far/near limit %.6g", inputMinimumNear, inputFarNearRatio);
-	ImGui::Text("Last projection near L/R: %.4f / %.4f", observedNear[0], observedNear[1]);
-	ImGui::Text("Last engine near: %.4f | cached L/R: %.4f / %.4f", observedEngineNear, cachedNear[0], cachedNear[1]);
+		ImGui::TextUnformatted(T("feature.vr.near_clip.near_override_inactive", "Near override inactive: using the engine camera"));
+	ImGui::Text(T("feature.vr.near_clip.source_near", "Source near L/R: %.6g / %.6g"), inputNear[0], inputNear[1]);
+	ImGui::Text(T("feature.vr.near_clip.source_far", "Source far L/R: %.6g / %.6g"), inputFar[0], inputFar[1]);
+	ImGui::Text(T("feature.vr.near_clip.source_minimum", "Source minimum %.6g | far/near limit %.6g"), inputMinimumNear, inputFarNearRatio);
+	ImGui::Text(T("feature.vr.near_clip.last_projection_near", "Last projection near L/R: %.4f / %.4f"), observedNear[0], observedNear[1]);
+	ImGui::Text(T("feature.vr.near_clip.last_engine_near", "Last engine near: %.4f | cached L/R: %.4f / %.4f"), observedEngineNear, cachedNear[0], cachedNear[1]);
 	for (uint32_t eye = 0; eye < 2; ++eye) {
 		if (std::isfinite(nearest[eye]))
-			ImGui::Text("Nearest %s: relevant %.3f | absolute %.3f", eye == 0 ? "L" : "R", nearest[eye], absoluteNearest[eye]);
+			ImGui::Text(T("feature.vr.near_clip.nearest_relevant", "Nearest %s: relevant %.3f | absolute %.3f"), eye == 0 ? "L" : "R", nearest[eye], absoluteNearest[eye]);
 		else
-			ImGui::Text("Nearest %s: no valid geometry", eye == 0 ? "L" : "R");
+			ImGui::Text(T("feature.vr.near_clip.nearest_no_geometry", "Nearest %s: no valid geometry"), eye == 0 ? "L" : "R");
 	}
 	if (lastSample > 0.0)
-		ImGui::Text("Depth age: %.0f ms", (Util::GetNowSecs() - lastSample) * 1000.0);
+		ImGui::Text(T("feature.vr.near_clip.depth_age", "Depth age: %.0f ms"), (Util::GetNowSecs() - lastSample) * 1000.0);
 }
 
 void VRDynamicNearClip::DrawSettings()
