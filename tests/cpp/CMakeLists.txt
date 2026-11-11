@@ -64,6 +64,7 @@ add_executable(
     test_bootsnapshot.cpp
     test_dynamicnearclip.cpp
     test_camera_reprojection.cpp
+    test_dlssg_dynamic.cpp
     test_subrect.cpp
     test_gaze_math.cpp
     test_perfutils.cpp
@@ -78,6 +79,7 @@ add_executable(
     test_atlas_allocator.cpp
     test_mathutils.cpp
     test_snowcover_math.cpp
+    test_snowdeformation_math.cpp
     test_rain_texture_footprint.cpp
     test_llf_sanitize.cpp
     test_litregion.cpp
