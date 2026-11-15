@@ -64,6 +64,8 @@ add_executable(
     test_bootsnapshot.cpp
     test_dynamicnearclip.cpp
     test_camera_reprojection.cpp
+    test_dlssg_dynamic.cpp
+    test_dlssg_preset.cpp
     test_subrect.cpp
     test_gaze_math.cpp
     test_perfutils.cpp
@@ -78,6 +80,7 @@ add_executable(
     test_atlas_allocator.cpp
     test_mathutils.cpp
     test_snowcover_math.cpp
+    test_snowdeformation_math.cpp
     test_rain_texture_footprint.cpp
     test_llf_sanitize.cpp
     test_litregion.cpp
@@ -95,6 +98,7 @@ add_executable(
     test_shadercacheclear.cpp
     test_generationclaim.cpp
     test_framelatch.cpp
+    test_dlssg_input_fence.cpp
     test_lightattachgate.cpp
     test_pointersearch.cpp
     test_splitlatchbackoff.cpp

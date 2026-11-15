@@ -159,6 +159,12 @@ public:
 
 	Util::LazyShader<ID3D11ComputeShader> mainCompositeCS;
 	Util::LazyShader<ID3D11ComputeShader> mainCompositeInteriorCS;
+	Util::LazyShader<ID3D11ComputeShader> mainCompositeIBLLuminanceRatioCS;
+	Util::LazyShader<ID3D11ComputeShader> mainCompositeInteriorIBLLuminanceRatioCS;
+	Util::LazyShader<ID3D11ComputeShader> mainCompositeLinearACEScgCS;
+	Util::LazyShader<ID3D11ComputeShader> mainCompositeInteriorLinearACEScgCS;
+	Util::LazyShader<ID3D11ComputeShader> mainCompositeIBLLuminanceRatioLinearACEScgCS;
+	Util::LazyShader<ID3D11ComputeShader> mainCompositeInteriorIBLLuminanceRatioLinearACEScgCS;
 
 	// Directional shadow structured buffer (t98): cascade splits and projections.
 	Buffer* directionalShadowLights = nullptr;
@@ -230,7 +236,10 @@ public:
 		/** @brief Installs all deferred rendering hooks into the game's vtables and call sites. */
 		static void Install()
 		{
-			stl::write_vfunc<0x35, BSCubeMapCamera_RenderCubemap>(RE::VTABLE_BSCubeMapCamera[0]);
+			if (globals::game::isVR)
+				stl::write_vfunc<0x36, BSCubeMapCamera_RenderCubemap>(RE::VTABLE_BSCubeMapCamera[0]);
+			else
+				stl::write_vfunc<0x35, BSCubeMapCamera_RenderCubemap>(RE::VTABLE_BSCubeMapCamera[0]);
 
 			const bool isAE1799 = REL::Module::IsAtLeast(REL::Version(1, 7, 99, 0));
 

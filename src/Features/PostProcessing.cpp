@@ -21,6 +21,7 @@
 #include "Features/PostProcessing/PostProcessingUI.h"
 #include "Features/Upscaling.h"
 
+#include <algorithm>
 #include <format>
 
 namespace
@@ -114,7 +115,7 @@ void PostProcessing::DrawSettings()
 		ImGui::PushID("CinematicCamera");
 		ImGui::Checkbox("##Enabled", &cinematicCamera.settings.Enabled);
 		ImGui::SameLine();
-		if (Icons::Button("##Bars", Icons::TI(ICON_TI_MENU_2)))
+		if (Util::LabeledButton("##Bars", Icons::TI(ICON_TI_MENU_2)))
 			activeSettingsPage = SettingsPage::CinematicCamera;
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::TextUnformatted(T("feature.post_processing.edit_settings_for_this_feature", "Edit settings for this feature."));
@@ -134,7 +135,7 @@ void PostProcessing::DrawSettings()
 				if (!drawForcedEnabled("##Enabled", *feat))
 					ImGui::Checkbox("##Enabled", &feat->enabled);
 				ImGui::SameLine();
-				if (Icons::Button("##Bars", Icons::TI(ICON_TI_MENU_2))) {
+				if (Util::LabeledButton("##Bars", Icons::TI(ICON_TI_MENU_2))) {
 					activePipelineFeature = i;
 					activeSettingsPage = SettingsPage::SubFeature;
 				}
@@ -148,7 +149,7 @@ void PostProcessing::DrawSettings()
 			}
 		}
 	} else if (activeSettingsPage == SettingsPage::SubFeature) {
-		if (Icons::LabeledButton("##BackToPipeline", Icons::TI(ICON_TI_ARROW_LEFT),
+		if (Util::LabeledButton("##BackToPipeline", Icons::TI(ICON_TI_ARROW_LEFT),
 				T("feature.post_processing.back_to_pipeline", "Back to Pipeline"))) {
 			activeSettingsPage = SettingsPage::Pipeline;
 		}
@@ -164,7 +165,7 @@ void PostProcessing::DrawSettings()
 				ImGui::TextWrapped("%s", description.c_str());
 
 				ImGui::Spacing();
-				if (Icons::LabeledButton("##RecompileShaders", Icons::TI(ICON_TI_REFRESH),
+				if (Util::LabeledButton("##RecompileShaders", Icons::TI(ICON_TI_REFRESH),
 						T("feature.post_processing.recompile_shaders", "Recompile Shaders"))) {
 					feat->ClearShaderCache();
 				}
@@ -192,7 +193,7 @@ void PostProcessing::DrawSettings()
 			activeSettingsPage = SettingsPage::Pipeline;
 		}
 	} else if (activeSettingsPage == SettingsPage::CinematicCamera) {
-		if (Icons::LabeledButton("##BackToPipeline", Icons::TI(ICON_TI_ARROW_LEFT),
+		if (Util::LabeledButton("##BackToPipeline", Icons::TI(ICON_TI_ARROW_LEFT),
 				T("feature.post_processing.back_to_pipeline", "Back to Pipeline"))) {
 			activeSettingsPage = SettingsPage::Pipeline;
 		}
@@ -392,6 +393,16 @@ void PostProcessing::SaveActiveSettings(json& o_json)
 	cinematicCamera.SaveSettings(cameraSettings);
 	o_json["cinematic_camera"] = cameraSettings;
 	o_json.erase("ppsettings");
+}
+
+void PostProcessing::ApplyContextualDefaults(json& a_defaults) const
+{
+	for (const auto& pipe : pipeline) {
+		if (!pipe)
+			continue;
+		if (auto section = a_defaults.find(pipe->GetType()); section != a_defaults.end() && section->contains("settings"))
+			pipe->ApplyContextualDefaults((*section)["settings"]);
+	}
 }
 
 void PostProcessing::RestoreDefaultSettings()
@@ -704,6 +715,7 @@ void PostProcessing::CopyToRenderTarget(
 	targetRT.texture->GetDesc(Util::AsW32(&targetDesc));
 
 	if (!convert && srcDesc.Format == targetDesc.Format && srcDesc.Width == targetDesc.Width && srcDesc.Height == targetDesc.Height) {
+		CS_GPU_PASS("PostProcessing::CopyToTarget");
 		context->CopySubresourceRegion(Util::AsReal(targetRT.texture), 0, 0, 0, 0, srcTex, 0, nullptr);
 		return;
 	}
@@ -711,6 +723,7 @@ void PostProcessing::CopyToRenderTarget(
 	if (!copyPS || !fullscreenVS || !convertTex || !convertTex->rtv || !convertTex->resource)
 		return;
 
+	CS_GPU_PASS("PostProcessing::ConvertToTarget");
 	DrawCopy(*convertTex, srcTex, srcSRV, conversion);
 
 	context->CopySubresourceRegion(Util::AsReal(targetRT.texture), 0, 0, 0, 0, convertTex->resource.get(), 0, nullptr);
@@ -853,15 +866,36 @@ void PostProcessing::PreProcess(RE::RENDER_TARGET a_input, RE::RENDER_TARGET a_o
 			pipe->UpdateAutoEnabled();
 	}
 
+	const auto canDraw = [&](const auto& pipe) {
+		return pipe && pipe->IsActive() && !(inMainLoadingMenu && pipe->DisableInMainLoadingMenu()) &&
+		       (!pipe->DrawBeforeUpscaling() || !upscaling.loaded);
+	};
+	const auto gradingIndex = static_cast<size_t>(FeaturePipelineIndex::ColorGrading);
+	const auto firstLaterFeature = pipeline.begin() + gradingIndex + 1;
+	const auto canDrawAfterGrading = [&](const auto& pipe) { return canDraw(pipe) && pipe->DrawAfterColorGrading(); };
+	const bool directTarget = !hasInput && !inMainLoadingMenu &&
+	                          std::none_of(firstLaterFeature, pipeline.end(), canDraw) &&
+	                          std::none_of(pipeline.begin(), firstLaterFeature, canDrawAfterGrading);
+	bool gradingWroteAlternate = false;
+
 	// go through each fx
 	for (auto& pipe : pipeline) {
-		if (pipe && pipe->IsActive() && !pipe->DrawAfterColorGrading() && !(inMainLoadingMenu && pipe->DisableInMainLoadingMenu()) && (!pipe->DrawBeforeUpscaling() || !upscaling.loaded)) {
-			DrawFeature(*pipe, lastTexColor);
+		if (!canDraw(pipe) || pipe->DrawAfterColorGrading())
+			continue;
+		if (directTarget && pipe == pipeline[gradingIndex]) {
+			const auto gradingTarget = PostProcessFeature::TextureInfo{
+				Util::AsReal(gameTexMain.texture), Util::AsReal(gameTexMain.SRV)
+			};
+			gradingWroteAlternate = static_cast<ColorGrading&>(*pipe).DrawToTarget(
+				lastTexColor, gradingTarget, Util::AsReal(gameTexMain.RTV),
+				Util::AsReal(gameTexMainAlt.texture), Util::AsReal(gameTexMainAlt.RTV));
+			continue;
 		}
+		DrawFeature(*pipe, lastTexColor);
 	}
 
 	for (auto& pipe : pipeline) {
-		if (pipe && pipe->IsActive() && pipe->DrawAfterColorGrading() && !(inMainLoadingMenu && pipe->DisableInMainLoadingMenu()) && (!pipe->DrawBeforeUpscaling() || !upscaling.loaded)) {
+		if (canDraw(pipe) && pipe->DrawAfterColorGrading()) {
 			DrawFeature(*pipe, lastTexColor);
 		}
 	}
@@ -889,8 +923,9 @@ void PostProcessing::PreProcess(RE::RENDER_TARGET a_input, RE::RENDER_TARGET a_o
 		}
 	} else {
 		CopyToRenderTarget(gameTexMain, useMainCopy ? mainCopyConvertTex : mainConvertTex, lastTexColor.tex, lastTexColor.srv, conversion);
-		CopyToRenderTarget(gameTexMainAlt, useMainCopy ? mainConvertTex : mainCopyConvertTex,
-			Util::AsReal(gameTexMain.texture), Util::AsReal(gameTexMain.SRV), CopyCB{});
+		if (!gradingWroteAlternate || conversion.gamma != 1.f || conversion.inputGamut != conversion.outputGamut)
+			CopyToRenderTarget(gameTexMainAlt, useMainCopy ? mainConvertTex : mainCopyConvertTex,
+				Util::AsReal(gameTexMain.texture), Util::AsReal(gameTexMain.SRV), CopyCB{});
 	}
 
 	isrefraction = false;

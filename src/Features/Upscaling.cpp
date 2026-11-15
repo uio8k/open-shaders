@@ -6,7 +6,10 @@
 #include "HDRDisplay.h"
 #include "Hooks.h"
 #include "Menu.h"
+#include "RenderDoc.h"
+#include "ScreenshotFeature.h"
 #include "State.h"
+#include "Upscaling/DLSSGPreset.h"
 #include "Upscaling/DX12SwapChain.h"
 #include "Upscaling/FidelityFX.h"
 #include "Upscaling/FoveatedRender.h"
@@ -40,7 +43,7 @@ namespace NR
 		style, useAutoMask, regionOfInterest, regionOverlay, regionFit, regionGroup, regionFollowFoveation,
 		parallelEyes, allowUnverifiedRuntime, runtimeVariant, materialStrength, strengthSkin, strengthHair, strengthEyes, strengthFoliage, strengthLandscape, strengthCloth, strengthMetal,
 		strengthOther, strengthEdgeSoftness, showMaterialMap, materialMapMode, materialMapFilter,
-		skipFrameReuse, skipFrameGapMode, modelPreset, modelScale, modelGuidedUpsample, sbsEvaluate, modelVerify, mirrorEyes, crossEyeGain);
+		skipFrameReuse, skipFrameGapMode, skipFrameInterval, flatReuseInterval, flatReuseMaxTurnDegrees, flatReuseMaxMoveUnits, modelPreset, modelScale, modelGuidedUpsample, sbsEvaluate, modelVerify, mirrorEyes, crossEyeGain);
 }
 
 namespace NR::Context
@@ -60,6 +63,9 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	frameGenerationAllowInMenus,
 	enableDLSSFrameGen,
 	dlssgFramesToGenerate,
+	dlssgDynamic,
+	dlssgDynamicTargetFPS,
+	dlssgPreset,
 	streamlineLogLevel,
 	sharpnessFSR,
 	sharpnessEnabledDLSS,
@@ -476,7 +482,7 @@ void Upscaling::ApplyPerformanceProfile(PerfProfile profile)
 			if (!foveatedRender.subrectController.HasCustomCrop())
 				foveatedRender.subrectController.ApplyPresetByName(preset.cropPresetName);
 		}
-		NR::SetEyeMode(settings.neuralRenderingTuning, preset.neuralEyeMode);
+		NR::SelectProfileEyeMode(settings.neuralRenderingTuning, preset.neuralEyeMode);
 	}
 }
 
@@ -721,6 +727,18 @@ void Upscaling::RegisterUxActions()
 	FEATURE_QUERY("gazeStatus",
 		"Eye-tracked foveation gaze: whether Follow eye gaze is on (enabled), the selected source mode (sourceMode: 0 SteamVR then OSC, 1 SteamVR only, 2 OSC only), the source that supplied the last sample (source: kNone, kSteamVr or kOsc), whether that sample was valid (valid), the per-eye gaze centres in normalized eye UV with y down (centres, left then right), whether the gaze override is currently placing the crop (active), the lifetime count of valid frames (validFrames) and settings.gazeRecentreThreshold. The OSC listener reports oscListening, oscPort, oscPackets, oscBindFailed and lastOscAddress; a bind failure is logged once and not retried until the port changes. Settings live under foveatedRender in openshaders.feature: gazeFollow, gazeSource, gazeOscPort, gazeRecentreThreshold and gazeOffsetX/gazeOffsetY. Params: none.",
 		GazeStatus);
+
+	FEATURE_QUERY("dlssgPresetStatus",
+		"DLSS-G model preset: selected is settings.dlssgPreset (0 Default, 1 A, 2 B, 3 C; C needs DLSS-G 310.9.16 or newer), atBoot is the value this session started with, and driverProfileValue is the DLSS-FG preset key (0x10E41DF1) in the driver profile for Skyrim SE, or null when the key is unset or unreadable, and presetCSupported is whether the installed nvngx_dlssg.dll is 310.9.16 or newer (Preset C is hidden from the menu and never written otherwise). nvngx_dlssg.dll reads that key when frame generation starts, so a change applies on the next launch. Setting dlssgPreset through openshaders.feature writes the key, the launch-time settings load never does; Default removes it only when replacing an explicit preset. Flatrim only. Params: none.",
+		([](const Feature* self, const json&) -> json {
+			const auto& upscaling = *static_cast<const Upscaling*>(self);
+			return json{
+				{ "selected", upscaling.settings.dlssgPreset },
+				{ "atBoot", upscaling.bootSnapshot.Boot(&Settings::dlssgPreset) },
+				{ "driverProfileValue", optionalJson(Streamline::ReadDLSSGPresetFromDriverProfile()) },
+				{ "presetCSupported", upscaling.streamlineDX12.PresetCSupported() }
+			};
+		}));
 
 	FEATURE_COMMAND("retryNeuralRendering",
 		"Queue one Neural Rendering retry: the same flag the Retry NR button sets. The next enabled world frame retires and rebuilds a failed runtime, and the request resets history; a healthy runtime is not rebuilt. Params: none.",
@@ -977,6 +995,26 @@ void Upscaling::DrawFrameGenerationSettings()
 				"Selects NVIDIA DLSS-G instead of AMD FSR on supported hardware.\n"
 				"Leave off to use AMD FSR."));
 
+		{
+			Util::DisableGuard presetDisabled(!settings.enableDLSSFrameGen);
+			const char* dlssgPresets[DLSSGPreset::kCount] = {
+				T(TKEY("dlssg_preset_default"), "Default"),
+				T(TKEY("dlssg_preset_a"), "Preset A"),
+				T(TKEY("dlssg_preset_b"), "Preset B"),
+				T(TKEY("dlssg_preset_c"), "Preset C")
+			};
+			const uint previousPreset = settings.dlssgPreset;
+			const int presetCount = static_cast<int>(DLSSGPreset::AvailableCount(streamlineDX12.PresetCSupported()));
+			if (Util::Combo(T(TKEY("dlssg_preset"), "DLSS-G Preset"), &settings.dlssgPreset, dlssgPresets, presetCount))
+				SyncDLSSGPresetDriverProfile(previousPreset);
+			Util::UI::RestartGatedAnnotate(bootSnapshot, settings, &Settings::dlssgPreset,
+				T(TKEY("dlssg_preset_tooltip"),
+					"Choose which DLSS-G frame generation model to use.\n"
+					"Default leaves the choice to the driver and the NVIDIA App.\n"
+					"Preset C needs DLSS-G 310.9.16 or newer.\n"
+					"Saved to the driver profile for Skyrim, replacing an NVIDIA App DLSS-G model override."));
+		}
+
 		bool fgForce = settings.frameGenerationForceEnable != 0;
 		if (ImGui::Checkbox(T(TKEY("force_enable_frame_generation"), "Allow frame generation below 120 Hz"), &fgForce))
 			settings.frameGenerationForceEnable = fgForce ? 1 : 0;
@@ -1006,12 +1044,35 @@ void Upscaling::DrawFrameGenerationSettings()
 	if (fgMethod == FrameGenMethod::kDLSSG) {
 		ImGui::TextUnformatted(T(TKEY("frame_generation_dlssg_active"), "Method: NVIDIA DLSS-G"));
 		Util::DisableGuard disabled(!fgEnabled);
-		int multiplier = static_cast<int>(settings.dlssgFramesToGenerate) + 1;
-		int maxMultiplier = static_cast<int>(streamlineDX12.dlssgMaxFramesToGenerate) + 1;
-		if (ImGui::SliderInt(T(TKEY("dlssg_frame_multiplier"), "DLSS-G Frame Multiplier"), &multiplier, 2, maxMultiplier, "%dx"))
-			settings.dlssgFramesToGenerate = static_cast<uint>(multiplier - 1);
+		const bool dynamicActive = settings.dlssgDynamic && streamlineDX12.dlssgDynamicSupported;
+		{
+			Util::DisableGuard multiplierDisabled(dynamicActive);
+			int multiplier = static_cast<int>(settings.dlssgFramesToGenerate) + 1;
+			int maxMultiplier = static_cast<int>(streamlineDX12.dlssgMaxFramesToGenerate) + 1;
+			if (ImGui::SliderInt(T(TKEY("dlssg_frame_multiplier"), "DLSS-G Frame Multiplier"), &multiplier, 2, maxMultiplier, "%dx"))
+				settings.dlssgFramesToGenerate = static_cast<uint>(multiplier - 1);
+		}
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::Text("%s", T(TKEY("dlssg_frame_multiplier_tooltip"), "How many total frames are shown per rendered frame. Higher values generate more frames."));
+
+		{
+			Util::DisableGuard dynamicDisabled(!streamlineDX12.dlssgDynamicSupported);
+			ImGui::Checkbox(T(TKEY("dlssg_dynamic"), "Dynamic Multi-Frame Generation"), &settings.dlssgDynamic);
+			if (auto _tt = Util::HoverTooltipWrapper())
+				ImGui::Text("%s", T(TKEY("dlssg_dynamic_tooltip"),
+									  "NVIDIA Dynamic Multi-Frame Generation changes the multiplier each frame to hold the target frame rate.\n"
+									  "The DLSS-G Frame Multiplier is ignored while this is on.\n"
+									  "With VSync on, it targets the display refresh rate and ignores Target Frame Rate."));
+		}
+		if (!streamlineDX12.dlssgDynamicSupported)
+			ImGui::TextDisabled("%s", T(TKEY("dlssg_dynamic_unsupported"), "Dynamic Multi-Frame Generation is not supported by this GPU, driver or DLSS-G DLL."));
+		else if (settings.dlssgDynamic) {
+			ImGui::SliderFloat(T(TKEY("dlssg_dynamic_target_fps"), "Target Frame Rate"), &settings.dlssgDynamicTargetFPS, 0.0f, kDLSSGDynamicTargetFPSMax,
+				settings.dlssgDynamicTargetFPS <= 0.0f ? T(TKEY("dlssg_dynamic_target_fps_display"), "Display refresh rate") : "%.0f FPS",
+				ImGuiSliderFlags_AlwaysClamp);
+			if (auto _tt = Util::HoverTooltipWrapper())
+				ImGui::Text("%s", T(TKEY("dlssg_dynamic_target_fps_tooltip"), "The output frame rate Dynamic Multi-Frame Generation aims for. 0 uses the display refresh rate."));
+		}
 	} else if (fgMethod == FrameGenMethod::kFSR) {
 		ImGui::TextUnformatted(T(TKEY("frame_generation_fsr_active"), "Method: AMD FSR"));
 		if (fgEnabled)
@@ -1272,6 +1333,7 @@ void Upscaling::LoadSettings(json& o_json)
 	}
 	// Missing schema fields take the current default during deserialization, so legacy settings need an explicit migration version.
 	const bool hadFsr4SchemaVersion = o_json.contains("fsr4RuntimeSelectionSchemaVersion");
+	const uint previousDLSSGPreset = settings.dlssgPreset;
 	settings = o_json;
 	settings.neuralRenderingTuning.Sanitize();
 	settings.neuralRenderingContexts.Sanitize();
@@ -1310,6 +1372,11 @@ void Upscaling::LoadSettings(json& o_json)
 		logger::warn("[Upscaling] Loaded presetDLSS {} out of range, resetting to 0 (Default)", settings.presetDLSS);
 		settings.presetDLSS = 0;
 	}
+	if (settings.dlssgPreset >= DLSSGPreset::AvailableCount(streamlineDX12.PresetCSupported())) {
+		logger::warn("[Upscaling] Loaded dlssgPreset {} out of range, resetting to 0 (Default)", settings.dlssgPreset);
+		settings.dlssgPreset = 0;
+	}
+	SyncDLSSGPresetDriverProfile(previousDLSSGPreset);
 	if (settings.streamlineLogLevel > 2) {  // Off, Default, Verbose
 		logger::warn("[Upscaling] Loaded streamlineLogLevel {} out of range, clamping to 2", settings.streamlineLogLevel);
 		settings.streamlineLogLevel = 2;
@@ -1348,10 +1415,20 @@ void Upscaling::LoadSettings(json& o_json)
 
 void Upscaling::RestoreDefaultSettings()
 {
+	const uint previousDLSSGPreset = settings.dlssgPreset;
 	settings = {};
+	SyncDLSSGPresetDriverProfile(previousDLSSGPreset);
 	neuralRendering.ResetHistory();
 	foveatedRender.RestoreDefaultSettings();
 	ApplyOpenCompositeUpscalingBlocker(true);
+}
+
+void Upscaling::SyncDLSSGPresetDriverProfile(uint a_previousPreset)
+{
+	if (globals::game::isVR || !bootSnapshot.IsLatched())
+		return;
+	if (!Streamline::ApplyDLSSGPresetToDriverProfile(a_previousPreset, settings.dlssgPreset, streamlineDX12.PresetCSupported()))
+		settings.dlssgPreset = a_previousPreset;
 }
 
 void Upscaling::DataLoaded()
@@ -2555,12 +2632,32 @@ void Upscaling::PostDisplay()
 	globals::state->UpdateSharedData(false, false);
 }
 
-void Upscaling::TimerSleepQPC(int64_t targetQPC)
+void Upscaling::TimerSleepQPC(int64_t targetQPC, int64_t frequency)
 {
+	static const HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+
 	LARGE_INTEGER currentQPC;
-	do {
+	QueryPerformanceCounter(&currentQPC);
+	const int64_t duration = targetQPC - currentQPC.QuadPart;
+	if (duration <= 0)
+		return;
+
+	// Spin the tail like DXVK; timer wakes land late, more so on long waits
+	const int64_t spinTicks = frequency / 500 + duration / 6;
+	while (timer) {
+		const int64_t sleepTicks = targetQPC - currentQPC.QuadPart - spinTicks;
+		LARGE_INTEGER due;
+		due.QuadPart = -(sleepTicks * 10000000LL / frequency);
+		if (due.QuadPart >= 0 || !SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0))
+			break;
+		WaitForSingleObject(timer, 100);
 		QueryPerformanceCounter(&currentQPC);
-	} while (currentQPC.QuadPart < targetQPC);
+	}
+
+	while (currentQPC.QuadPart < targetQPC) {
+		YieldProcessor();
+		QueryPerformanceCounter(&currentQPC);
+	}
 }
 
 void Upscaling::FrameLimiter()
@@ -2589,15 +2686,19 @@ void Upscaling::FrameLimiter()
 			int64_t targetFrameTimeNS = int64_t(static_cast<double>(kNanosecondsPerSecond) / (refreshRate * frameRateScale));
 			int64_t targetFrameTicks = (targetFrameTimeNS * qpf.QuadPart) / kNanosecondsPerSecond;
 
-			static LARGE_INTEGER lastFrame = {};
+			// Fixed cadence: a late frame is repaid next frame instead of drifting
+			static int64_t nextFrame = 0;
+			// FG toggles with menus; rebase the pending deadline onto the new interval
+			static int64_t lastFrameTicks = 0;
+			nextFrame += targetFrameTicks - lastFrameTicks;
+			lastFrameTicks = targetFrameTicks;
+
 			LARGE_INTEGER timeNow;
 			QueryPerformanceCounter(&timeNow);
-
-			int64_t delta = timeNow.QuadPart - lastFrame.QuadPart;
-			if (delta < targetFrameTicks) {
-				TimerSleepQPC(lastFrame.QuadPart + targetFrameTicks);
-			}
-			QueryPerformanceCounter(&lastFrame);
+			if (timeNow.QuadPart < nextFrame)
+				TimerSleepQPC(nextFrame, qpf.QuadPart);
+			// Over a whole interval behind (hitch, limiter re-enabled): restart from now
+			nextFrame = timeNow.QuadPart < nextFrame + targetFrameTicks ? nextFrame + targetFrameTicks : timeNow.QuadPart + targetFrameTicks;
 		}
 	}
 }
@@ -2736,6 +2837,10 @@ void Upscaling::LoadUpscalingSDKs()
 	streamlineDX12.interposerDllName = L"sl.interposer.dll";
 	streamlineDX12.instanceTag = "DX12";
 	streamlineDX12.LoadInterposer();
+	if (settings.dlssgPreset >= DLSSGPreset::AvailableCount(streamlineDX12.PresetCSupported())) {
+		logger::warn("[Upscaling] dlssgPreset {} needs nvngx_dlssg.dll 310.9.16 or newer, resetting to 0 (Default)", settings.dlssgPreset);
+		settings.dlssgPreset = 0;
+	}
 
 	fidelityFX.LoadFFX();  // AMD FSR frame generation
 }
@@ -2936,7 +3041,6 @@ void Upscaling::FillMenuCameraMotionVectors()
 
 		ID3D11ShaderResourceView* srvs[] = { Util::AsReal(depth.depthSRV) };
 		context->PSSetShaderResources(0, 1, srvs);
-		// b1: the slot FullscreenPassScope saves and restores.
 		auto* constantBuffer = cameraMotionVectorsCB->CB();
 		context->PSSetConstantBuffers(1, 1, &constantBuffer);
 
@@ -3216,6 +3320,7 @@ void Upscaling::UpscaleDepth()
 	// (kNONE/kTAA VR path) without going through Upscale() first — match the
 	// same precondition here to avoid a debug-layer hazard when depth happens
 	// to still be bound as a DSV from a prior pass.
+	Util::FullscreenPassScope stateScope(context);
 	context->OMSetRenderTargets(0, nullptr, nullptr);
 
 	// Set up Input Assembler for fullscreen triangle (no vertex/index buffers needed)
@@ -3343,9 +3448,6 @@ void Upscaling::UpscaleDepth()
 		CS_GPU_PASS("Upscaling::DepthVRPropagate");
 		copyIfNonAliased(Util::AsReal(depthCopy.texture), Util::AsReal(depth.texture));
 	}
-
-	ID3D11ShaderResourceView* nullPSResources[3] = { nullptr, nullptr, nullptr };
-	context->PSSetShaderResources(0, ARRAYSIZE(nullPSResources), nullPSResources);
 }
 
 void Upscaling::RunUnderwaterMaskRepair()
@@ -3501,6 +3603,7 @@ void Upscaling::Main_UpdateJitter::thunk(RE::BSGraphics::State* a_state)
 void Upscaling::MenuManagerDrawInterfaceStartHook::thunk(int64_t a1)
 {
 	globals::features::upscaling.PostDisplay();
+	globals::features::screenshotFeature.SnapshotCleanScene();
 
 	// For non-Frame Gen HDR: redirect kFRAMEBUFFER.RTV to UI texture before vanilla UI renders
 	// When FG is active, its SetUIBuffer redirects to uiBufferWrapped instead

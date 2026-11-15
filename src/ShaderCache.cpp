@@ -15,6 +15,7 @@
 #include <cmath>
 #include <d3dcompiler.h>
 #include <fstream>
+#include <future>
 #include <mutex>
 #include <unordered_map>
 
@@ -26,6 +27,7 @@
 #include "Utils/ContentHash.h"
 #include "Utils/D3D.h"
 #include "Utils/GenerationClaim.h"
+#include "Utils/Logging.h"
 #include "Utils/ShaderCacheManifest.h"
 #include "Utils/ShaderContentStore.h"
 #include "Utils/StandaloneShaderCacheKey.h"
@@ -557,8 +559,9 @@ namespace SIE
 		if (!ShaderCache::Instance().IsDiskCache() || !globals::state->enableContentStore.load(std::memory_order_relaxed))
 			return nullptr;
 		if (GetCompilerIdentity().empty()) {
-			static std::once_flag warned;
-			std::call_once(warned, [] { logger::warn("Shader content store disabled: could not identify d3dcompiler_47.dll"); });
+			static Util::OnceFlag warned;
+			if (warned.First())
+				logger::warn("Shader content store disabled: could not identify d3dcompiler_47.dll");
 			return nullptr;
 		}
 		static Util::ShaderContentStore::Store& store = []() -> Util::ShaderContentStore::Store& {
@@ -752,14 +755,70 @@ namespace SIE
 			return 0x3F & (descriptor >> 24);
 		}
 
-		static void GetLightingShaderDefines(uint32_t descriptor, std::span<D3D_SHADER_MACRO> defines)
+		static void GetLightingShaderDefines(uint32_t descriptor, std::span<D3D_SHADER_MACRO> defines, ShaderClass shaderClass)
 		{
+			const bool pixel = shaderClass == ShaderClass::Pixel;
+			const bool snowCoverInactive = pixel && (descriptor & ShaderCache::kLightingSnowCoverInactive);
+			if (snowCoverInactive)
+				descriptor &= ~ShaderCache::kLightingSnowCoverInactive;
+			const bool dryWeather = pixel && (descriptor & ShaderCache::kLightingDryWeather);
+			if (dryWeather)
+				descriptor &= ~ShaderCache::kLightingDryWeather;
+			const bool noMeshVariation = pixel && ShaderCache::SupportsMeshVariationVariant(descriptor) &&
+			                             (descriptor & ShaderCache::kLightingNoMeshVariation);
+			if (noMeshVariation)
+				descriptor &= ~ShaderCache::kLightingNoMeshVariation;
+			constexpr auto noTreeBend = ShaderCache::kVertexNoTreeBend;
+			const bool omitTreeBend = shaderClass == ShaderClass::Vertex && (descriptor & noTreeBend) != 0;
+			if (omitTreeBend)
+				descriptor &= ~noTreeBend;
+			const bool linearACEScg = pixel && (descriptor & ShaderCache::kLightingLinearACEScg);
+			if (linearACEScg)
+				descriptor &= ~ShaderCache::kLightingLinearACEScg;
+			const bool deferredPixel = pixel && (descriptor & static_cast<uint32_t>(ShaderCache::LightingShaderFlags::Deferred));
+			const bool omitLocalLights = deferredPixel && (descriptor & ShaderCache::kLightingNoLocalLights);
+			const bool singleClusterLight = deferredPixel && (descriptor & ShaderCache::kLightingSingleClusterLight);
+			const bool omitLocalShadowMaps = deferredPixel && (descriptor & ShaderCache::kLightingNoLocalShadowMaps);
+			const bool omitLegacySubsurface = deferredPixel && (descriptor & ShaderCache::kLightingNoLegacySubsurface);
+			const bool omitLocalContactShadows = deferredPixel && (descriptor & ShaderCache::kLightingNoLocalContactShadows);
+			if (omitLocalLights)
+				descriptor &= ~ShaderCache::kLightingNoLocalLights;
+			if (singleClusterLight)
+				descriptor &= ~ShaderCache::kLightingSingleClusterLight;
+			if (omitLocalShadowMaps)
+				descriptor &= ~ShaderCache::kLightingNoLocalShadowMaps;
+			if (omitLocalContactShadows)
+				descriptor &= ~ShaderCache::kLightingNoLocalContactShadows;
+			if (omitLegacySubsurface)
+				descriptor &= ~ShaderCache::kLightingNoLegacySubsurface;
 			RE::GetLightingShaderDefines(descriptor, reinterpret_cast<REX::W32::D3D_SHADER_MACRO*>(defines.data()));
 
 			size_t lastIndex = std::ranges::find_if(defines, [](const D3D_SHADER_MACRO& macro) { return macro.Name == nullptr; }) - defines.begin();
 
+			if (snowCoverInactive)
+				defines[lastIndex++] = { "SNOW_COVER_INACTIVE", nullptr };
+			if (dryWeather)
+				defines[lastIndex++] = { "DRY_WEATHER", nullptr };
+			if (noMeshVariation)
+				defines[lastIndex++] = { "NO_MESH_VARIATION", nullptr };
+			if (omitTreeBend)
+				defines[lastIndex++] = { "NO_TREE_BEND", nullptr };
+			if (linearACEScg)
+				defines[lastIndex++] = { "LINEAR_ACESCG", nullptr };
+			if (omitLocalLights)
+				defines[lastIndex++] = { "LLF_NO_LOCAL_LIGHTS", nullptr };
+			if (singleClusterLight)
+				defines[lastIndex++] = { "LLF_SINGLE_CLUSTER_LIGHT", nullptr };
 			if (descriptor & static_cast<uint32_t>(ShaderCache::LightingShaderFlags::Deferred)) {
 				defines[lastIndex++] = { "DEFERRED", nullptr };
+				if (omitLocalShadowMaps)
+					defines[lastIndex++] = { "LLF_NO_LOCAL_LIGHT_SHADOWS", nullptr };
+				if (omitLocalContactShadows)
+					defines[lastIndex++] = { "LLF_NO_CONTACT_SHADOWS", nullptr };
+				if (omitLegacySubsurface)
+					defines[lastIndex++] = { "NO_LEGACY_SUBSURFACE", nullptr };
+				if (descriptor & static_cast<uint32_t>(ShaderCache::LightingShaderFlags::IBLLuminanceRatio))
+					defines[lastIndex++] = { "IBL_LUMINANCE_RATIO", nullptr };
 			}
 			if ((descriptor & static_cast<uint32_t>(ShaderCache::LightingShaderFlags::TruePbr)) != 0) {
 				defines[lastIndex++] = { "TRUE_PBR", nullptr };
@@ -1017,9 +1076,16 @@ namespace SIE
 			defines[lastIndex] = { nullptr, nullptr };
 		}
 
-		static void GetEffectShaderDefines(uint32_t descriptor, std::span<D3D_SHADER_MACRO> defines)
+		static void GetEffectShaderDefines(uint32_t descriptor, std::span<D3D_SHADER_MACRO> defines, ShaderClass shaderClass)
 		{
 			size_t lastIndex = 0;
+			if (shaderClass == ShaderClass::Pixel && (descriptor & ShaderCache::kEffectLinearACEScg))
+				defines[lastIndex++] = { "LINEAR_ACESCG", nullptr };
+			if (shaderClass == ShaderClass::Pixel && (descriptor & ShaderCache::kEffectAmbientWorldIBL)) {
+				defines[lastIndex++] = { "AMBIENT_WORLD_EFFECT_LIGHTING", nullptr };
+				defines[lastIndex++] = { "IBL_LUMINANCE_RATIO", nullptr };
+				defines[lastIndex++] = { "IBL_NO_DALC", nullptr };
+			}
 
 			if (descriptor & static_cast<uint32_t>(ShaderCache::EffectShaderFlags::Vc)) {
 				defines[lastIndex++] = { "VC", nullptr };
@@ -1192,11 +1258,13 @@ namespace SIE
 			defines[lastIndex] = { nullptr, nullptr };
 		}
 
-		static void GetUtilityShaderDefines(uint32_t descriptor, std::span<D3D_SHADER_MACRO> defines)
+		static void GetUtilityShaderDefines(uint32_t descriptor, std::span<D3D_SHADER_MACRO> defines, ShaderClass shaderClass)
 		{
 			using enum ShaderCache::UtilityShaderFlags;
 
 			size_t lastIndex = 0;
+			if (shaderClass == ShaderClass::Vertex && (descriptor & ShaderCache::kVertexNoTreeBend))
+				defines[lastIndex++] = { "NO_TREE_BEND", nullptr };
 			const auto shadowMaskFlags = static_cast<uint32_t>(RenderShadowmask) |
 			                             static_cast<uint32_t>(RenderShadowmaskDpb) |
 			                             static_cast<uint32_t>(RenderShadowmaskPb) |
@@ -1384,7 +1452,7 @@ namespace SIE
 			return;
 		}
 
-		static void GetShaderDefines(const RE::BSShader& shader, uint32_t descriptor, std::span<D3D_SHADER_MACRO> defines)
+		static void GetShaderDefines(const RE::BSShader& shader, uint32_t descriptor, std::span<D3D_SHADER_MACRO> defines, ShaderClass shaderClass = ShaderClass::Total)
 		{
 			switch (shader.shaderType.get()) {
 			case RE::BSShader::Type::Grass:
@@ -1403,7 +1471,7 @@ namespace SIE
 				GetImagespaceShaderDefines(shader, defines);
 				break;
 			case RE::BSShader::Type::Lighting:
-				GetLightingShaderDefines(descriptor, defines);
+				GetLightingShaderDefines(descriptor, defines, shaderClass);
 				break;
 			case RE::BSShader::Type::DistantTree:
 				GetDistantTreeShaderDefines(descriptor, defines);
@@ -1412,10 +1480,10 @@ namespace SIE
 				GetParticleShaderDefines(descriptor, defines);
 				break;
 			case RE::BSShader::Type::Effect:
-				GetEffectShaderDefines(descriptor, defines);
+				GetEffectShaderDefines(descriptor, defines, shaderClass);
 				break;
 			case RE::BSShader::Type::Utility:
-				GetUtilityShaderDefines(descriptor, defines);
+				GetUtilityShaderDefines(descriptor, defines, shaderClass);
 				break;
 			case RE::BSShader::Type::None:
 			case RE::BSShader::Type::Total:
@@ -1620,6 +1688,7 @@ namespace SIE
 				{ "PBRParams2", grassPSConstants.PBRParams2 },
 				{ "PBRParams3", grassPSConstants.PBRParams3 },
 				{ "PBRParams4", grassPSConstants.PBRParams4 },
+				{ "PBRParams5", grassPSConstants.PBRParams5 },
 			};
 
 			auto& particleVS = result[static_cast<size_t>(RE::BSShader::Type::Particle)]
@@ -2067,7 +2136,7 @@ namespace SIE
 		{
 			auto sourceShaderFile = shader.fxpFilename;
 			std::array<D3D_SHADER_MACRO, 64> defines{};
-			SIE::SShaderCache::GetShaderDefines(shader, descriptor, std::span{ defines });
+			SIE::SShaderCache::GetShaderDefines(shader, descriptor, std::span{ defines }, shaderClass);
 			std::string result;
 			if (hashkey)  // generate hashkey so don't include descriptor
 				result = fmt::format("{}:{}:{}", sourceShaderFile, magic_enum::enum_name(shaderClass), SIE::SShaderCache::MergeDefinesString(defines, true));
@@ -2251,9 +2320,12 @@ namespace SIE
 						// An unreadable timestamp means source-vs-cache freshness can't be verified; treat as a miss.
 						diskCacheOutdated = true;
 						logger::debug("Failed to read disk cache mtime for {}: {}", Util::WStringToString(diskPath), ec.message());
-					} else if (std::filesystem::exists(shaderSourcePath)) {
-						const auto sourceTime = GetMaxShaderMTime(shaderSourcePath, std::filesystem::path(shaderSourcePath).parent_path());
-						if (sourceTime > diskCacheTime) {
+					} else {
+						(void)std::filesystem::last_write_time(shaderSourcePath, ec);
+						if (ec) {
+							diskCacheOutdated = true;
+							logger::debug("Failed to read source mtime for {}: {}", Util::WStringToString(shaderSourcePath), ec.message());
+						} else if (GetMaxShaderMTime(shaderSourcePath, std::filesystem::path(shaderSourcePath).parent_path()) > diskCacheTime) {
 							diskCacheOutdated = true;
 							logger::debug("Disk-cached shader {} outdated: source is newer than cache", SIE::SShaderCache::GetShaderString(shaderClass, shader, descriptor, true));
 						}
@@ -2299,7 +2371,7 @@ namespace SIE
 					defines[lastIndex++] = { shaderDefines->at(i).first.c_str(), shaderDefines->at(i).second.c_str() };
 			}
 			defines[lastIndex] = { nullptr, nullptr };  // do final entry
-			GetShaderDefines(shader, descriptor, std::span{ defines }.subspan(lastIndex));
+			GetShaderDefines(shader, descriptor, std::span{ defines }.subspan(lastIndex), shaderClass);
 
 			const std::wstring path = GetShaderPath(
 				shader.shaderType == RE::BSShader::Type::ImageSpace ?
@@ -2922,6 +2994,17 @@ namespace SIE
 
 		if (IsAsync()) {
 			compilationSet.Add({ ShaderClass::Pixel, shader, descriptor, a_precompile });
+			constexpr uint32_t specialization = kLightingDryWeather | kLightingSnowCoverInactive | kLightingNoMeshVariation |
+			                                    kLightingLinearACEScg | static_cast<uint32_t>(LightingShaderFlags::IBLLuminanceRatio);
+			const auto deferredSpecializations = (descriptor & static_cast<uint32_t>(LightingShaderFlags::Deferred)) ? (kLightingNoLocalShadowMaps | kLightingNoLocalContactShadows | kLightingNoLegacySubsurface) : 0u;
+			if (shader.shaderType == RE::BSShader::Type::Lighting && (descriptor & (specialization | deferredSpecializations)))
+				return GetPixelShader(shader, descriptor & ~(specialization | deferredSpecializations), a_precompile);
+			if (shader.shaderType == RE::BSShader::Type::Effect) {
+				if (descriptor & kEffectAmbientWorldIBL)
+					return GetPixelShader(shader, descriptor & ~kEffectAmbientWorldIBL, a_precompile);
+				if (descriptor & kEffectLinearACEScg)
+					return GetPixelShader(shader, descriptor & ~kEffectLinearACEScg, a_precompile);
+			}
 		} else {
 			return MakeAndAddPixelShader(shader, descriptor);
 		}
@@ -3056,6 +3139,7 @@ namespace SIE
 			std::unique_lock lockH{ hlslMapMutex };
 			hlslToShaderMap.clear();
 		}
+		ResetActiveShaderTracking();
 		compilationSet.Clear(true);
 		Util::ClearShaderCompileFailures();
 		globals::deferred->ClearShaderCache();
@@ -3080,6 +3164,7 @@ namespace SIE
 
 	bool ShaderCache::Clear(const std::string& a_path)
 	{
+		ResetActiveShaderTracking();
 		std::string lowerFilePath = Util::FixFilePath(a_path);
 
 		// Step 1: Lock hlslMapMutex to find and copy the relevant entries
@@ -3115,6 +3200,7 @@ namespace SIE
 	{
 		compilationSet.BumpTypeEpoch(a_type);
 		logger::debug("Clearing cache for {}", magic_enum::enum_name(a_type));
+		ResetActiveShaderTracking();
 		std::lock_guard lockGuardV(vertexShadersMutex);
 		{
 			for (auto& [id, shader] : vertexShaders[static_cast<size_t>(a_type)]) {
@@ -3157,7 +3243,9 @@ namespace SIE
 	bool ShaderCache::AddCompletedShader(ShaderClass shaderClass, const RE::BSShader& shader, uint32_t descriptor, winrt::com_ptr<ID3DBlob> a_blob, bool fromDisk, std::optional<uint64_t> a_taskGeneration)
 	{
 		auto key = SIE::SShaderCache::GetShaderString(shaderClass, shader, descriptor, true);
-		auto keyWithDescriptor = SIE::SShaderCache::GetShaderString(shaderClass, shader, descriptor, false);
+		const auto keyWithDescriptor = spdlog::should_log(spdlog::level::debug) ?
+		                                   SIE::SShaderCache::GetShaderString(shaderClass, shader, descriptor, false) :
+		                                   std::string{};
 		// The map's blob is shared across threads; the caller's d3dcompiler blob stays with the caller.
 		winrt::com_ptr<ID3DBlob> shared;
 		if (a_blob)
@@ -4606,16 +4694,6 @@ namespace SIE
 			auto newShader = SShaderCache::CreateVertexShader(*shaderBlob, shader,
 				descriptor);
 
-			std::lock_guard lockGuard(vertexShadersMutex);
-			// Clear() takes this same mutex to wipe vertexShaders, so a mismatch here means
-			// inserting now would resurrect state Clear() already removed.
-			if (IsTaskStale(a_taskGeneration, shader.shaderType.get())) {
-				logger::debug("Discarding stale-generation vertex shader {}::{:X} (task gen {}, current {})",
-					magic_enum::enum_name(shader.shaderType.get()), descriptor, *a_taskGeneration,
-					compilationSet.LiveGeneration(shader.shaderType.get()));
-				return nullptr;
-			}
-
 			const auto result = device->CreateVertexShader(shaderBlob->GetBufferPointer(),
 				newShader->byteCodeSize, nullptr, Util::AsReal(&newShader->shader));
 			if (FAILED(result)) {
@@ -4625,6 +4703,16 @@ namespace SIE
 					newShader->shader->Release();
 				}
 			} else {
+				std::lock_guard lockGuard(vertexShadersMutex);
+				// Clear() takes this same mutex to wipe vertexShaders, so a mismatch here means
+				// inserting now would resurrect state Clear() already removed.
+				if (IsTaskStale(a_taskGeneration, shader.shaderType.get())) {
+					logger::debug("Discarding stale-generation vertex shader {}::{:X} (task gen {}, current {})",
+						magic_enum::enum_name(shader.shaderType.get()), descriptor, *a_taskGeneration,
+						compilationSet.LiveGeneration(shader.shaderType.get()));
+					newShader->shader->Release();
+					return nullptr;
+				}
 				auto& entry = vertexShaders[static_cast<size_t>(shader.shaderType.get())][descriptor];
 				if (entry && entry->shader)
 					entry->shader->Release();
@@ -4651,16 +4739,6 @@ namespace SIE
 			auto newShader = SShaderCache::CreatePixelShader(*shaderBlob, shader,
 				descriptor);
 
-			std::lock_guard lockGuard(pixelShadersMutex);
-			// Clear() takes this same mutex to wipe pixelShaders, so a mismatch here means
-			// inserting now would resurrect state Clear() already removed.
-			if (IsTaskStale(a_taskGeneration, shader.shaderType.get())) {
-				logger::debug("Discarding stale-generation pixel shader {}::{:X} (task gen {}, current {})",
-					magic_enum::enum_name(shader.shaderType.get()), descriptor, *a_taskGeneration,
-					compilationSet.LiveGeneration(shader.shaderType.get()));
-				return nullptr;
-			}
-
 			const auto result = device->CreatePixelShader(shaderBlob->GetBufferPointer(),
 				shaderBlob->GetBufferSize(), nullptr, Util::AsReal(&newShader->shader));
 			if (FAILED(result)) {
@@ -4671,6 +4749,16 @@ namespace SIE
 					newShader->shader->Release();
 				}
 			} else {
+				std::lock_guard lockGuard(pixelShadersMutex);
+				// Clear() takes this same mutex to wipe pixelShaders, so a mismatch here means
+				// inserting now would resurrect state Clear() already removed.
+				if (IsTaskStale(a_taskGeneration, shader.shaderType.get())) {
+					logger::debug("Discarding stale-generation pixel shader {}::{:X} (task gen {}, current {})",
+						magic_enum::enum_name(shader.shaderType.get()), descriptor, *a_taskGeneration,
+						compilationSet.LiveGeneration(shader.shaderType.get()));
+					newShader->shader->Release();
+					return nullptr;
+				}
 				auto& entry = pixelShaders[static_cast<size_t>(shader.shaderType.get())][descriptor];
 				if (entry && entry->shader)
 					entry->shader->Release();
@@ -4697,16 +4785,6 @@ namespace SIE
 			auto newShader = SShaderCache::CreateComputeShader(*shaderBlob, shader,
 				descriptor);
 
-			std::lock_guard lockGuard(computeShadersMutex);
-			// Clear() takes this same mutex to wipe computeShaders, so a mismatch here means
-			// inserting now would resurrect state Clear() already removed.
-			if (IsTaskStale(a_taskGeneration, shader.shaderType.get())) {
-				logger::debug("Discarding stale-generation compute shader {}::{:X} (task gen {}, current {})",
-					magic_enum::enum_name(shader.shaderType.get()), descriptor, *a_taskGeneration,
-					compilationSet.LiveGeneration(shader.shaderType.get()));
-				return nullptr;
-			}
-
 			const auto result = device->CreateComputeShader(shaderBlob->GetBufferPointer(),
 				shaderBlob->GetBufferSize(), nullptr, Util::AsReal(&newShader->shader));
 			if (FAILED(result)) {
@@ -4717,6 +4795,16 @@ namespace SIE
 					newShader->shader->Release();
 				}
 			} else {
+				std::lock_guard lockGuard(computeShadersMutex);
+				// Clear() takes this same mutex to wipe computeShaders, so a mismatch here means
+				// inserting now would resurrect state Clear() already removed.
+				if (IsTaskStale(a_taskGeneration, shader.shaderType.get())) {
+					logger::debug("Discarding stale-generation compute shader {}::{:X} (task gen {}, current {})",
+						magic_enum::enum_name(shader.shaderType.get()), descriptor, *a_taskGeneration,
+						compilationSet.LiveGeneration(shader.shaderType.get()));
+					newShader->shader->Release();
+					return nullptr;
+				}
 				auto& entry = computeShaders[static_cast<size_t>(shader.shaderType.get())][descriptor];
 				if (entry && entry->shader)
 					entry->shader->Release();
@@ -4880,6 +4968,26 @@ namespace SIE
 		return { ContentStoreDisplayPath(), usage.blobs, usage.bytes, ContentStoreMaxBytes() };
 	}
 
+	static std::atomic<bool> g_contentStoreUsageStale{ true };
+
+	std::optional<ShaderCache::ContentStoreUsage> ShaderCache::GetCachedContentStoreUsage()
+	{
+		constexpr auto kRefreshInterval = std::chrono::seconds(5);
+		static std::mutex mutex;
+		static std::optional<ContentStoreUsage> usage;
+		static std::future<ContentStoreUsage> pending;
+		static std::chrono::steady_clock::time_point lastRefresh;
+		std::scoped_lock lock(mutex);
+		if (pending.valid() && pending.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+			usage = pending.get();
+		const auto now = std::chrono::steady_clock::now();
+		if (!pending.valid() && (g_contentStoreUsageStale.exchange(false) || now - lastRefresh >= kRefreshInterval)) {
+			pending = std::async(std::launch::async, [this] { return GetContentStoreUsage(); });
+			lastRefresh = now;
+		}
+		return usage;
+	}
+
 	void ShaderCache::ApplyContentStoreLimit()
 	{
 		auto* store = g_openedContentStore.load();
@@ -4887,8 +4995,12 @@ namespace SIE
 			return;
 		const auto maxBytes = ContentStoreMaxBytes();
 		store->SetMaxBytes(maxBytes);
+		g_contentStoreUsageStale = true;
 		// Walking and deleting can take a while on a large store; the store outlives the plugin, so detach.
-		std::thread([store, maxBytes] { store->Trim(maxBytes); }).detach();
+		std::thread([store, maxBytes] {
+			store->Trim(maxBytes);
+			g_contentStoreUsageStale = true;
+		}).detach();
 	}
 
 	void ShaderCache::ClearContentStore()
@@ -4899,6 +5011,7 @@ namespace SIE
 			store->Clear(ec);
 		else
 			std::filesystem::remove_all(ContentStorePath(), ec);
+		g_contentStoreUsageStale = true;
 		if (ec)
 			logger::warn("Failed to clear the persistent shader store: {}", ec.message());
 	}
@@ -5310,6 +5423,13 @@ namespace SIE
 		}
 	}
 
+	void ShaderCache::ResetActiveShaderTracking()
+	{
+		std::lock_guard lock(activeShadersMutex);
+		activeShaderKeys.clear();
+		activeShaders.clear();
+	}
+
 	void ShaderCache::ResetFrameShaderTracking()
 	{
 		if (!globals::state->IsDeveloperMode())
@@ -5480,7 +5600,12 @@ namespace SIE
 	void ShaderCompilationTask::Perform() const
 	{
 		ZoneScoped;
-		ZoneText(GetString().c_str(), GetString().size());
+#ifdef TRACY_ENABLE
+		if (TracyIsConnected) {
+			const auto taskString = GetString();
+			ZoneText(taskString.c_str(), taskString.size());
+		}
+#endif
 
 		if (shaderClass == ShaderClass::Vertex) {
 			ShaderCache::Instance().MakeAndAddVertexShader(shader, descriptor, GetGeneration());
@@ -5727,7 +5852,7 @@ namespace SIE
 	{
 		auto& cache = ShaderCache::Instance();
 		auto key = task.GetString();
-		auto shaderBlob = cache.GetCompletedShader(task);
+		auto shaderBlob = cache.GetCompletedShader(key);
 
 		bool shouldLogCompletion = false;
 		double completionTimeMs = 0.0;

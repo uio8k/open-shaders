@@ -4,6 +4,10 @@
 #	undef SNOW_COVER
 #endif
 
+#if defined(SNOW_COVER_INACTIVE)
+#	undef SNOW_COVER
+#endif
+
 #define LIGHTING
 
 #include "Common/Color.hlsli"
@@ -247,7 +251,11 @@ VS_OUTPUT main(VS_INPUT input)
 	float3x4 worldMatrix =
 		Skinned::GetBoneTransformMatrix(Bones, actualIndices, BonesPivot[eyeIndex], input.BoneWeights);
 #	endif
+#	if defined(NO_TREE_BEND)
+	const bool treeBendEnabled = false;
+#	else
 	const bool treeBendEnabled = (Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::TreeBend) != 0;
+#	endif
 	TreeWind::Sample treeWindSample;
 	treeWindSample.trunkVelocity = 0.0.xxx;
 	treeWindSample.leafAnimationStrength = 0.0;
@@ -813,7 +821,7 @@ cbuffer PerMaterial : register(b1)
 	float3 PBRParams1 : packoffset(c15.y);  // roughness scale, displacement scale, specular level
 	float4 PBRParams2 : packoffset(c16);    // subsurface color, subsurface opacity
 
-	float3 MaterialObjectRGBScale : packoffset(c17);  // RGB multipliers for material objects
+	float4 MaterialObjectRGBScale : packoffset(c17);  // projected material RGB scale, fuzz roughness (negative uses base roughness)
 };
 
 cbuffer PerGeometry : register(b2)
@@ -883,7 +891,7 @@ float GetRimLightMultiplier(float3 L, float3 V, float3 N)
 #	if !defined(TRUE_PBR)
 float ProcessSparkleColor(float color)
 {
-	return exp2(SparkleParams.y * log2(min(1, abs(color))));
+	return SparkleParams.y > 0 ? exp2(SparkleParams.y * log2(min(1, abs(color)))) : 1.0;
 }
 #	endif
 
@@ -1072,7 +1080,7 @@ float GetSnowParameterY(float texProjTmp, float alpha)
 #		undef SKYLIGHTING
 #	endif
 
-#	if defined(SKYLIGHTING)
+#	if defined(SKYLIGHTING) && (!defined(NO_LEGACY_SUBSURFACE) || defined(TRUE_PBR))
 #		define SKYLIGHTING_SHADOW_VIS
 #	endif
 
@@ -1119,10 +1127,17 @@ float GetSnowParameterY(float texProjTmp, float alpha)
 #		undef WETNESS_EFFECTS
 #	endif
 
-#	if defined(WETNESS_EFFECTS) && !defined(HAIR) && !defined(EYE) && !defined(LANDSCAPE)
+#	if defined(WETNESS_EFFECTS) && !defined(DRY_WEATHER) && !defined(HAIR) && !defined(EYE) && !defined(LANDSCAPE)
 #		define CHARACTER_RAIN_SURFACE
 #	endif
-
+#	if defined(WETNESS_EFFECTS) && defined(CHARACTER_RAIN_SURFACE) &&      \
+		!defined(SKINNED) && !defined(SKIN) && !defined(HAIR) &&            \
+		!defined(EYE) && !defined(FACEGEN) && !defined(FACEGEN_RGB_TINT) && \
+		!defined(TREE_ANIM) && !defined(FUR_SHELLS) &&                      \
+		!defined(LANDSCAPE) && !defined(LODLANDSCAPE) &&                    \
+		!defined(LODLANDNOISE) && !defined(LOD) && !defined(WORLD_MAP)
+#		define ENVIRONMENT_RAIN_DROPS
+#	endif
 #	if defined(WETNESS_EFFECTS)
 #		include "WetnessEffects/WetnessEffects.hlsli"
 #		if defined(CHARACTER_RAIN_SURFACE)
@@ -1136,7 +1151,7 @@ float GetSnowParameterY(float texProjTmp, float alpha)
 
 #	if defined(LODOBJECTS) || defined(LODOBJECTSHD) || defined(LODLANDSCAPE)
 static const uint RuntimeLightingFlags = 0;
-#	elif defined(LANDSCAPE)
+#	elif defined(LANDSCAPE) || defined(NO_LEGACY_SUBSURFACE)
 static const uint RuntimeLightingFlags = Permutation::LightingFlags::Specular;
 #	else
 static const uint RuntimeLightingFlags = Permutation::LightingFlags::Specular | Permutation::LightingFlags::SoftLighting | Permutation::LightingFlags::RimLighting | Permutation::LightingFlags::BackLighting;
@@ -1388,7 +1403,7 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 	// Lattice cell comes from the geometric UV, before the parallax block below rewrites uv.
 #	if !defined(LANDSCAPE) && (defined(TERRAIN_VARIATION_MESH) || defined(EMAT))
 	StochasticOffsets meshOffset = (StochasticOffsets)0;
-#		if defined(TERRAIN_VARIATION_MESH)
+#		if defined(TERRAIN_VARIATION_MESH) && !defined(NO_MESH_VARIATION)
 	const bool applyMeshTV = (Permutation::ExtraFeatureDescriptor & Permutation::ExtraFeatureFlags::TVMeshVariation) != 0;
 	[branch] if (applyMeshTV)
 	{
@@ -1399,7 +1414,7 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 #		endif
 #	endif
 
-#	if defined(TERRAIN_VARIATION_MESH) && !defined(LANDSCAPE)
+#	if defined(TERRAIN_VARIATION_MESH) && !defined(LANDSCAPE) && !defined(NO_MESH_VARIATION)
 #		define MESH_TV_SAMPLE(DEST, TEX, SAMP, UV)                     \
 			{                                                           \
 				[branch] if (applyMeshTV)                               \
@@ -1852,8 +1867,8 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 #		else
 	MESH_TV_SAMPLE_BIAS(rawBaseColor, TexColorSampler, SampColorSampler, diffuseUv, true);
 #			if defined(FUR_SHELLS)
-	if (input.FurShell > 0.0)
-		rawBaseColor.rgb = lerp(rawBaseColor.rgb, furSample.rgb, FurShells::ShellColor);
+	[branch] if (FurShells::ShellColor > 0.0 && input.FurShell > 0.0)
+		rawBaseColor.rgb = lerp(rawBaseColor.rgb, Color::DiffuseToWorking(furSample.rgb, pbrTextures), FurShells::ShellColor);
 #			endif
 	baseColor = float4(Color::Albedo(rawBaseColor.rgb), rawBaseColor.a);
 #		endif
@@ -2255,7 +2270,7 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 		float3 finalProjNormal = normalize(TransformNormal(projDetailNormal) * float3(1, 1, projNormal.z) + float3(projNormal.xy, 0));
 		float3 projBaseColor = Color::ProjectedDiffuse(
 			Triplanar::SampleStochastic(TexProjDiffuseSampler, SampProjDiffuseSampler, projWorldPos, triWeights, diffuseNormalScale, screenNoise).xyz,
-			ProjectedUVParams2.xyz, MaterialObjectRGBScale, (Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::ProjectedTextureIsSRGB) != 0);
+			ProjectedUVParams2.xyz, MaterialObjectRGBScale.xyz, (Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::ProjectedTextureIsSRGB) != 0);
 		projectedMaterialWeight = smoothstep(0, 1, 5 * (0.1 + projWeight));
 #			if defined(TRUE_PBR)
 		rawRMAOS.xyw = lerp(rawRMAOS.xyw, float3(ParallaxOccData.x, 0, ParallaxOccData.y), projectedMaterialWeight);
@@ -2352,6 +2367,9 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 
 	material.F0 = 0;
 	material.Roughness = 1;
+#	if !defined(TRUE_PBR)
+	material.AO = 1;
+#	endif
 
 #	if defined(TRUE_PBR)
 	material.Noise = screenNoise;
@@ -2401,7 +2419,7 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 	material.GlintDensityRandomization = clamp(glintParameters.w, PBR::Constants::MinGlintDensityRandomization, PBR::Constants::MaxGlintDensityRandomization);
 
 #		if defined(GLINT) && !defined(SNOW_COVER)
-	float glintNoise = Random::R1Modified(float(SharedData::FrameCount), (Random::pcg2d(uint2(input.Position.xy)) / 4294967296.0).x);
+	float glintNoise = Random::R1Modified(float(SharedData::FrameCount), (Random::pcg2d(uint2(Stereo::EyeStableNoiseCoord(input.Position.xy, SharedData::BufferDim.xy))) / 4294967296.0).x);
 	Glints::PrecomputeGlints(glintNoise, uvOriginal, ddx(uvOriginal), ddy(uvOriginal), material.GlintScreenSpaceScale, material.GlintCache);
 #		endif
 
@@ -2463,13 +2481,18 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 
 	[branch] if ((PBRFlags & PBR::Flags::Fuzz) != 0)
 	{
-		material.FuzzColor = MultiLayerParallaxData.xyz;
+		material.FuzzColor = Color::GamutTransform(MultiLayerParallaxData.xyz);
 		material.FuzzWeight = MultiLayerParallaxData.w;
+		material.FuzzRoughness = MaterialObjectRGBScale.w;
 		[branch] if ((PBRFlags & PBR::Flags::HasFeatureTexture1) != 0)
 		{
 			float4 sampledFuzzProperties = TexBackLightSampler.Sample(SampBackLightSampler, uv);
 			material.FuzzColor *= Color::Diffuse(sampledFuzzProperties.xyz);
 			material.FuzzWeight *= sampledFuzzProperties.w;
+		}
+		[branch] if ((PBRFlags & PBR::Flags::HasFuzzRoughnessTexture) != 0)
+		{
+			material.FuzzRoughness = TexParallaxSampler.Sample(SampParallaxSampler, uv).g;
 		}
 		material.FuzzWeight = lerp(material.FuzzWeight, 0, projectedMaterialWeight);
 	}
@@ -2846,6 +2869,12 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 	float wetness = 0.0;
 	float3 wetnessNormal = vertexNormal.xyz;
 
+#		if defined(ENVIRONMENT_RAIN_DROPS)
+	float environmentRainCoverage = 0.0f;
+	float3 environmentRainNormal = float3(0.0f, 0.0f, 1.0f);
+	float environmentRainBrightness = 1.0f;
+#		endif
+
 	// Calculate shore wetness factors
 	float wetnessDistToWater = abs(input.WorldPosition.z - waterHeight);
 	float shoreFactor = saturate(1.0 - (wetnessDistToWater / SharedData::wetnessEffectsSettings.ShoreRange));
@@ -2877,32 +2906,52 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 	                                    max(SharedData::wetnessEffectsSettings.CharacterImpactIntensity,
 											SharedData::wetnessEffectsSettings.CharacterRetainedWetness) > 0.0f &&
 	                                    (!heldWeapon || SharedData::wetnessEffectsSettings.EnableWeaponRainDrops);
-	[branch] if (evaluateCharacterDrops)
+#			if defined(ENVIRONMENT_RAIN_DROPS)
+	const bool evaluateEnvironmentDrops =
+		!characterRainSurface &&
+		(Permutation::PixelShaderDescriptor & Permutation::LightingFlags::CharacterLight) == 0 &&
+		SharedData::wetnessEffectsSettings.EnableRaindropFx &&
+		SharedData::wetnessEffectsSettings.Raining > 0.01f &&
+		!SharedData::InInterior &&
+		inWorld &&
+		!SharedData::HideSky &&
+		abs(vertexNormal.z) < 0.60f;
+	const float environmentSize = SharedData::wetnessEffectsSettings.EnvironmentDropSize;
+#			else
+	const bool evaluateEnvironmentDrops = false;
+	const float environmentSize = 1.0f;
+#			endif
+	[branch] if (evaluateCharacterDrops || evaluateEnvironmentDrops)
 	{
-		characterDrop = CharacterRainSpots::Evaluate(input.ModelPosition.xyz,
-			input.WorldPosition.xyz, vertexNormal.xyz, characterRainSkyVisibility, heldWeapon, eyeIndex);
+		characterDrop = CharacterRainSpots::Evaluate(
+			evaluateEnvironmentDrops ? input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz : input.ModelPosition.xyz,
+			input.WorldPosition.xyz, vertexNormal.xyz,
+			evaluateEnvironmentDrops ? wetnessOcclusion : characterRainSkyVisibility,
+			evaluateEnvironmentDrops ? false : heldWeapon, eyeIndex,
+			evaluateEnvironmentDrops ? -environmentSize : 1.0f);
 	}
 	float characterSpotMask = characterDrop.x;
 #		endif
 	// Calculate raindrop effects
 	float4 raindropInfo = float4(0, 0, 1, 0);
+#		if !defined(DRY_WEATHER)
 	bool shouldCalculateRaindrops = (worldNormal.z > 0.0) &&
 	                                (SharedData::wetnessEffectsSettings.Raining > 0.0) &&
 	                                (SharedData::wetnessEffectsSettings.EnableRaindropFx) &&
 	                                (wetnessOcclusion > 0.5);
-#		if defined(CHARACTER_RAIN_SURFACE)
+#			if defined(CHARACTER_RAIN_SURFACE)
 	shouldCalculateRaindrops = shouldCalculateRaindrops &&
 	                           !(characterRainSurface && SharedData::wetnessEffectsSettings.EnableCharacterRainSpots);
-#		endif
+#			endif
 
 	if (shouldCalculateRaindrops) {
-#		if defined(SKINNED)
+#			if defined(SKINNED)
 		float3 ripplePosition = input.ModelPosition.xyz;
-#		elif defined(DEFERRED)
+#			elif defined(DEFERRED)
 		float3 ripplePosition = input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
-#		else
+#			else
 		float3 ripplePosition = !FrameBuffer::FrameParams.y ? input.ModelPosition.xyz : input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust[eyeIndex].xyz;
-#		endif
+#			endif
 		raindropInfo = WetnessEffects::GetRainDrops(ripplePosition, SharedData::wetnessEffectsSettings.Time, wetnessNormal, flatnessAmount);
 	}
 
@@ -2910,14 +2959,18 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 	float rainWetness = SharedData::wetnessEffectsSettings.Wetness * minWetnessAngle * SharedData::wetnessEffectsSettings.MaxRainWetness;
 	rainWetness = max(rainWetness, raindropInfo.w);
 
-#		if defined(HAIR)
+#			if defined(HAIR)
 	rainWetness = SharedData::wetnessEffectsSettings.HairWetness * SharedData::wetnessEffectsSettings.Wetness;
-#		elif defined(SKIN)
+#			elif defined(SKIN)
 	rainWetness = 0.0f;
-#		endif
-#		if defined(CHARACTER_RAIN_SURFACE)
+#			endif
+#			if defined(CHARACTER_RAIN_SURFACE)
 	if (characterRainSurface)
 		rainWetness = 0.0f;
+#			endif
+
+#		else
+	float rainWetness = 0.0f;
 #		endif
 
 #		if defined(CS_SKIN) && !defined(SKIN)
@@ -2937,7 +2990,11 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 	wetness = max(shoreWetness, rainWetness);
 
 	// Calculate puddle effects
+#		if defined(DRY_WEATHER)
+	const float puddleWetness = 0.0f;
+#		else
 	float puddleWetness = SharedData::wetnessEffectsSettings.PuddleWetness * minWetnessAngle;
+#		endif
 	float puddle = wetness;
 
 #		if !defined(SKINNED) && !defined(SKIN)
@@ -2961,6 +3018,44 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 	if (input.WorldPosition.z < waterHeight) {
 		wetnessGlossinessSpecular *= shoreFactor;
 	}
+
+	// Experimental environmental droplets using the character rain geometry.
+	// Character surfaces retain their existing, independent rendering path.
+#		if defined(ENVIRONMENT_RAIN_DROPS)
+	[branch] if (evaluateEnvironmentDrops)
+	{
+		float3 environmentDrops = characterDrop;
+
+		float environmentCoverage = environmentDrops.x *
+		                            saturate(SharedData::wetnessEffectsSettings.Raining);
+
+		environmentRainBrightness =
+			SharedData::wetnessEffectsSettings.EnvironmentDropBrightness;
+
+		float environmentHeight =
+			environmentDrops.y *
+			environmentSize *
+			CharacterRainSpots::DropHeightScale;
+
+		float3 environmentNormal =
+			CharacterRainSpots::CalculateWorldNormalFromHeight(
+				environmentHeight,
+				input.WorldPosition.xyz,
+				normalize(lerp(worldNormal.xyz, vertexNormal.xyz, 0.75f)));
+
+		// Save droplet information for the lighting calculations.
+		environmentRainCoverage = environmentCoverage;
+		environmentRainNormal = environmentNormal;
+
+		wetnessNormal = normalize(lerp(
+			wetnessNormal,
+			environmentNormal,
+			saturate(environmentCoverage * environmentRainBrightness)));
+
+		// Dedicated droplet highlights are handled separately.
+		// Preserve the normal environmental wetness response.
+	}
+#		endif
 
 	// Update flatness and normal calculations
 	flatnessAmount *= smoothstep(SharedData::wetnessEffectsSettings.PuddleMinWetness, 1.0, wetnessGlossinessSpecular);
@@ -3010,6 +3105,15 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 		                               saturate(characterRetainedWetness * SharedData::wetnessEffectsSettings.CharacterWetSheen);
 		characterCoatMask = max(characterSpotMask, characterSheenMask);
 	}
+#			if defined(ENVIRONMENT_RAIN_DROPS)
+	[branch] if (environmentRainCoverage > 0.0f)
+	{
+		characterSpotSurfaceNormal = environmentRainNormal;
+		characterSpotRoughness = 0.12f;
+		characterCoatMask = environmentRainCoverage * environmentRainBrightness;
+		characterCoatIntensity = SharedData::wetnessEffectsSettings.EnvironmentDropReflectivity;
+	}
+#			endif
 	// The thin surface film supplies broad gloss while localized drops retain their own normal and absorption.
 	[branch] if (characterRainSurface && characterCoatMask > 0.0f && inWorld)
 	{
@@ -3095,7 +3199,7 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 	float dirSoftShadow = 1.0;
 	float dirVSMDetailedShadow = 1.0;
 
-#	if defined(VOLUMETRIC_SHADOWS)
+#	if defined(VOLUMETRIC_SHADOWS) && (!defined(DEFERRED) || defined(LOD))
 	if (inWorld && !inReflection && ShadowSampling::HasDirectionalShadows()
 #		if defined(DEFERRED)
 	    && !UseSkylightingShadowVisibility()
@@ -3275,6 +3379,9 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 	DirectLightingOutput dirLightOutput;
 #	if defined(TRUE_PBR)
 	dirLightContext = CreateDirectLightingContext(worldNormal.xyz, coatWorldNormal, vertexNormal.xyz, refractedViewDirection, viewDirection, refractedDirLightDirection, DirLightDirection, dirLightColor, dirDetailedShadow, dirSoftShadow);
+	float directFuzzNdotV = clamp(abs(dot(dirLightContext.worldNormal, dirLightContext.viewDir)), isThinSurface ? 0.0f : EPSILON_DOT_CLAMP, 1.0f);
+	material.Fuzz = PBR::CreateFuzzLayer(material, directFuzzNdotV);
+	PBR::CacheFuzzLTC(material.Fuzz, dirLightContext.worldNormal, dirLightContext.viewDir, directFuzzNdotV);
 	if (thinSurfaceNormals)
 		dirLightContext.backTransmissionVisibility = PBR::GetThinSurfaceBackTransmissionVisibility(thinSurfaceFaceNormal, DirLightDirection);
 #	else
@@ -3289,7 +3396,8 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 
 	float2 uvOriginal_ddx = ddx(uvOriginal);
 	float2 uvOriginal_ddy = ddy(uvOriginal);
-	EvaluateLighting(dirLightContext, material, tbnTr, uvOriginal, uvOriginal_ddx, uvOriginal_ddy, dirLightOutput);
+	EvaluateLighting(dirLightContext, material,
+		tbnTr, uvOriginal, uvOriginal_ddx, uvOriginal_ddy, dirLightOutput);
 	dirLightOutput.transmission *= dirTransmissionContactShadow;
 #	if defined(WETNESS_EFFECTS)
 	if (waterRoughnessSpecular < 1)
@@ -3396,7 +3504,8 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 		}
 #				endif
 #			endif
-		EvaluateLighting(pointLightContext, material, tbnTr, uvOriginal, uvOriginal_ddx, uvOriginal_ddy, pointLightOutput);
+		EvaluateLighting(pointLightContext, material,
+			tbnTr, uvOriginal, uvOriginal_ddx, uvOriginal_ddy, pointLightOutput);
 #			if defined(WETNESS_EFFECTS)
 		if (waterRoughnessSpecular < 1)
 			EvaluateWetnessLighting(wetnessNormal, pointLightContext, waterRoughnessSpecular, pointLightOutput);
@@ -3414,11 +3523,12 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 		transmissionColor += pointLightOutput.transmission;
 	}
 
-#		else
+#		elif !defined(LLF_NO_LOCAL_LIGHTS) || defined(LLFDEBUG)
 
+#			if !defined(LLF_SINGLE_CLUSTER_LIGHT) || defined(LLFDEBUG)
 	uint numClusteredLights = 0;
-	uint totalLightCount = LightLimitFix::NumStrictLights;
 	uint clusterIndex = 0;
+	uint totalLightCount = LightLimitFix::NumStrictLights;
 	uint lightOffset = 0;
 	// The viewmodel has no meaningful cluster cell, so it takes StrictLights
 	// exclusively -- mixing in the grid would re-add unrelated distant lights.
@@ -3427,12 +3537,13 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 		totalLightCount += numClusteredLights;
 		lightOffset = LightLimitFix::lightGrid[clusterIndex].offset;
 	}
+#			endif
 
 #			if defined(LLFDEBUG)
 	LightLimitFix::LLFDebugInfo llfDebug = LightLimitFix::LLFDebugInfoInit();
 #			endif
 
-#			if defined(DEFERRED)
+#			if defined(DEFERRED) && !defined(LLF_NO_CONTACT_SHADOWS)
 	// Contact-shadow setup, gated on the runtime toggle so we don't pay the
 	// noise hash + step-count math for every pixel when the feature is off
 	// (it defaults off). The step count and noise are reused across every
@@ -3451,6 +3562,11 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 	}
 #			endif
 
+#			if defined(LLF_SINGLE_CLUSTER_LIGHT) && !defined(LLFDEBUG)
+	[unroll] for (uint lightIndex = 0; lightIndex < 1; lightIndex++)
+	{
+		LightLimitFix::Light light = LightLimitFix::lights[0];
+#			else
 	[loop] for (uint lightIndex = 0; lightIndex < totalLightCount; lightIndex++)
 	{
 		LightLimitFix::Light light;
@@ -3463,8 +3579,18 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 			if (LightLimitFix::IsLightIgnored(light))
 				continue;
 		}
+#			endif
 
 		float3 lightDirection = light.positionWS[eyeIndex].xyz - input.WorldPosition.xyz;
+#			if defined(LLF_SINGLE_CLUSTER_LIGHT) && !defined(LLFDEBUG)
+		const float reach = max(light.radius, rcp(light.invRadius)) * (1.0 + 1e-5) + 0.01;
+		[branch] if (any(abs(lightDirection) > reach)) continue;
+		uint clusterIndex = 0;
+		if (!inWorld || LightLimitFix::FirstPerson || !LightLimitFix::GetClusterIndex(screenUV, viewPosition.z, clusterIndex))
+			continue;
+		if (LightLimitFix::lightGrid[clusterIndex].lightCount == 0 || LightLimitFix::IsLightIgnored(light))
+			continue;
+#			endif
 		float lightDist = length(lightDirection);
 
 		float intensityMultiplier = LightLimitFix::GetAttenuation(lightDist, light);
@@ -3477,12 +3603,14 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 
 		float shadowComponent = 1.0;
 		bool shadowCoverage = false;
+#			if !defined(LLF_NO_LOCAL_LIGHT_SHADOWS)
 		if (inWorld && !inReflection) {
 			if (light.lightFlags & LightLimitFix::LightFlags::Shadow) {
 				shadowComponent = LightLimitFix::GetShadowLightShadow(light.shadowMapIndex, worldPositionWS + (localShadowPosition - input.WorldPosition.xyz), rotationMatrix, shadowCoverage);
 				lightShadow *= shadowComponent;
 			}
 		}
+#			endif
 
 #			if defined(LLFDEBUG)
 		uint llfShadowType = (light.lightFlags & LightLimitFix::LightFlags::Shadow &&
@@ -3497,7 +3625,7 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 
 		float contactShadow = 1.0;
 
-#			if defined(DEFERRED)
+#			if defined(DEFERRED) && !defined(LLF_NO_CONTACT_SHADOWS)
 		// Outer guard: contactShadowSteps > 0 covers both "feature off" and "pixel past
 		// MaxDistance", so all per-light intensity-gate math is paid only when a raymarch
 		// is actually possible. Without this, the falloff math fires for every clustered
@@ -3508,7 +3636,11 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 			// Clustered lights need a normalized falloff to compare against MinIntensity;
 			// recompute it, since GetAttenuation isn't [0,1]-normalized for inverse-square
 			// lights and the threshold would mean different things otherwise.
+#				if defined(LLF_SINGLE_CLUSTER_LIGHT) && !defined(LLFDEBUG)
+			const bool isClusteredLight = true;
+#				else
 			const bool isClusteredLight = lightIndex >= LightLimitFix::NumStrictLights;
+#				endif
 			bool passesIntensityGate = !isClusteredLight;
 			if (isClusteredLight) {
 				float falloffFactor = saturate(lightDist * light.invRadius);
@@ -3591,7 +3723,8 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 		}
 #				endif
 #			endif
-		EvaluateLighting(pointLightContext, material, tbnTr, uvOriginal, uvOriginal_ddx, uvOriginal_ddy, pointLightOutput);
+		EvaluateLighting(pointLightContext, material,
+			tbnTr, uvOriginal, uvOriginal_ddx, uvOriginal_ddy, pointLightOutput);
 #			if defined(WETNESS_EFFECTS)
 		if (waterRoughnessSpecular < 1)
 			EvaluateWetnessLighting(wetnessNormal, pointLightContext, waterRoughnessSpecular, pointLightOutput);
@@ -3706,7 +3839,7 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 	float3 directionalAmbientColor = Color::Ambient(max(0, mul(DirectionalAmbient, float4(ambientNormal, 1.0))));
 
 #	if defined(IBL)
-	if (SharedData::iblSettings.EnableIBL) {
+	if (ImageBasedLighting::IsEnabled()) {
 		if (SharedData::iblSettings.UseStaticIBL && !inWorld && !inReflection) {
 			directionalAmbientColor = ImageBasedLighting::GetStaticDiffuseIBL(ambientNormal, SampColorSampler);
 		}
@@ -3762,7 +3895,7 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 #	endif  // defined (HAIR)
 
 #	if defined(IBL)
-	if (SharedData::iblSettings.EnableIBL) {
+	if (ImageBasedLighting::IsEnabled()) {
 		if (!(SharedData::iblSettings.UseStaticIBL && !inWorld && !inReflection)) {
 #		if defined(SKYLIGHTING) && !defined(INTERIOR)
 			directionalAmbientColor = ImageBasedLighting::GetDiffuseIBLOccluded(directionalAmbientColor, -ambientNormal, skylightingDiffuse);
@@ -3810,7 +3943,14 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 
 	indirectContext = CreateIndirectLightingContext(ambientNormal, vertexNormal.xyz, viewDirection);
 
-	GetIndirectLobeWeights(indirectLobeWeights, indirectContext, material, uvOriginal);
+#	if defined(TRUE_PBR)
+	float indirectFuzzNdotV = clamp(abs(dot(indirectContext.worldNormal, indirectContext.viewDir)), isThinSurface ? 0.0f : EPSILON_DOT_CLAMP, 1.0f);
+	// Ambient uses its own normal and the unrefracted view, so rebuild the layer only if that changes NdotV.
+	[branch] if (indirectFuzzNdotV != directFuzzNdotV)
+		material.Fuzz = PBR::CreateFuzzLayer(material, indirectFuzzNdotV);
+#	endif
+	GetIndirectLobeWeights(indirectLobeWeights, indirectContext, material,
+		uvOriginal);
 
 #	if defined(WETNESS_EFFECTS)
 #		if defined(DYNAMIC_CUBEMAPS)
@@ -3955,7 +4095,6 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 	radianceSpecularColor += characterRainSpecular + radianceRainDifference;
 #		endif
 #	endif
-
 #	if defined(LOD_LAND_BLEND) && defined(TRUE_PBR)
 	{
 		lodLandDiffuseColor += directionalAmbientColor;
@@ -3993,7 +4132,7 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 	skylightingAlbedo /= Color::PBRLightingScale;
 #		endif
 #		if defined(IBL) && !defined(INTERIOR)
-	if (!SharedData::iblSettings.EnableIBL)
+	if (!ImageBasedLighting::IsEnabled())
 #		endif
 	{
 #		if defined(CAPTURE_REFLECTION_RADIANCE)
@@ -4050,7 +4189,11 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 		color.xyz += characterSpotReflectance * DynamicCubemaps::GetDynamicCubemapSpecularIrradiance(characterSpotSurfaceNormal, viewDirection, characterSpotRoughness);
 #				endif
 #			else
+#				if defined(ENVIRONMENT_RAIN_DROPS)
+		color.xyz += characterSpotReflectance * (environmentRainCoverage > 0.0f ? directionalAmbientColor : characterRainAmbientColor);
+#				else
 		color.xyz += characterSpotReflectance * characterRainAmbientColor;
+#				endif
 #			endif
 	}
 #		endif
@@ -4061,7 +4204,7 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 	float3 fogColor = Color::Fog(input.FogParam.xyz);
 	float fogFactor = input.FogParam.w;
 #		if defined(IBL)
-	if (SharedData::iblSettings.EnableIBL) {
+	if (ImageBasedLighting::IsEnabled()) {
 		fogColor = ImageBasedLighting::GetFogIBLColor(fogColor);
 	}
 #		endif
@@ -4081,8 +4224,11 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 		fogColor = 0.0;
 	}
 	if ((FrameBuffer::FrameParams.y && FrameBuffer::FrameParams.z) || inReflection) {
+		// ISSAOComposite's fade (FogColor.w = 1 / frame buffer range); reflections skip the composite.
+		float fogFade = inReflection ? 1.0 : FogColor.w;
 #		if defined(EXP_HEIGHT_FOG)
 		if (SharedData::exponentialHeightFogSettings.enabled) {
+			fogFade = ExponentialHeightFog::GetVanillaFogFade(fogFade);
 			if (!ExponentialHeightFog::ShouldDisableVanillaFog()) {
 				color.xyz = Color::BlendFog(color.xyz, vanillaFogColor, vanillaFogFactor);
 #			if defined(CAPTURE_REFLECTION_RADIANCE)
@@ -4105,6 +4251,7 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 		radianceColor = Color::BlendFog(radianceColor, fogColor, fogFactor);
 #			endif
 #		endif
+		color.xyz *= fogFade;
 	}
 #	endif
 
@@ -4360,7 +4507,7 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 #	endif
 
 #	if defined(CHARACTER_RAIN_SURFACE)
-	if (SharedData::wetnessEffectsSettings.CharacterSpotDebug && characterRainSurface && inWorld) {
+	if (SharedData::wetnessEffectsSettings.CharacterSpotDebug && SharedData::wetnessEffectsSettings.CharacterSpotDebug != CharacterRainSpots::EnvironmentDebugMode && characterRainSurface && inWorld) {
 		float characterDebugMask = SharedData::wetnessEffectsSettings.CharacterSpotDebug == CharacterRainSpots::SurfaceDebugMode ? 1.0f :
 		                                                                                                                           (SharedData::wetnessEffectsSettings.CharacterSpotDebug == CharacterRainSpots::WeaponDebugMode ? float(heldWeapon) : characterSpotMask);
 		psout.Diffuse.xyz = characterDebugMask.xxx;
@@ -4368,6 +4515,26 @@ FUR_EARLY_DEPTH_STENCIL PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFro
 		psout.Specular.xyz = 0.0f;
 		psout.Albedo.xyz = 0.0f;
 		psout.Reflectance.xyz = 0.0f;
+#		endif
+	}
+#	endif
+
+#	if defined(ENVIRONMENT_RAIN_DROPS)
+	if (SharedData::wetnessEffectsSettings.CharacterSpotDebug == CharacterRainSpots::EnvironmentDebugMode && inWorld) {
+		const bool characterSkipped = (Permutation::PixelShaderDescriptor & Permutation::LightingFlags::CharacterLight) != 0;
+		if (environmentRainCoverage > 0.0f) {
+			psout.Diffuse.xyz = float3(1.0f, 0.0f, 1.0f);
+		} else if (evaluateEnvironmentDrops) {
+			psout.Diffuse.xyz = float3(0.0f, 1.0f, 0.0f);
+		} else if (characterSkipped) {
+			psout.Diffuse.xyz = float3(1.0f, 1.0f, 0.0f);
+		}
+#		if defined(DEFERRED)
+		if (environmentRainCoverage > 0.0f || evaluateEnvironmentDrops || characterSkipped) {
+			psout.Specular.xyz = 0.0f;
+			psout.Albedo.xyz = 0.0f;
+			psout.Reflectance.xyz = 0.0f;
+		}
 #		endif
 	}
 #	endif

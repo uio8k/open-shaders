@@ -1,6 +1,7 @@
 #include "SnowCover.h"
 
 #include "Profiler.h"
+#include "ShaderCache.h"
 #include "SnowCoverMath.h"
 #include "TruePBR/BSLightingShaderMaterialPBR.h"
 #include "Utils/D3D.h"
@@ -52,6 +53,17 @@ SnowCover::PerFrame SnowCover::GetCommonBufferData(bool inWorld)
 	if (frame.IsNewFrame())
 		UpdateFrame();
 	return perFrame;
+}
+
+SnowCover::PerFrame SnowCover::PrepareFrameData(bool inWorld)
+{
+	const auto data = GetCommonBufferData(inWorld);
+	auto& flags = globals::state->deferredLightingShaderFlags;
+	constexpr auto snowCoverInactive = SIE::ShaderCache::kLightingSnowCoverInactive;
+	flags &= ~snowCoverInactive;
+	if (loaded && !data.wsettings.EnableSnowCover)
+		flags |= snowCoverInactive;
+	return data;
 }
 
 void SnowCover::UpdateFrame()
@@ -727,17 +739,22 @@ void SnowCover::DataLoaded()
 	}
 }
 
+float SnowCover::SnowAmountAt(const RE::NiPoint3& a_position) const
+{
+	if (!perFrame.wsettings.EnableSnowCover)
+		return 0.0f;
+	const float map = snowMap.Sample(a_position.x * wsettings.mapScale.x + wsettings.mapOffset.x, a_position.y * wsettings.mapScale.y + wsettings.mapOffset.y);
+	const float environment = (a_position.z - settings.SnowHeightOffset + (map - 0.5f) * wsettings.mapZscale + perFrame.SeasonalAltitude) / wsettings.BlendSmoothness;
+	const float weather = timeSnowing * timeSnowing * timeSnowing * std::max(500.0f, snowingDensity) / 500.0f;
+	return std::clamp(std::max(environment, weather), 0.0f, 1.0f);
+}
+
 void SnowCover::UpdateSurvival()
 {
 	float amount = 0.0f;
 	const auto* player = globals::game::player;
-	if (survivalEnabled && survivalGlobal && perFrame.wsettings.EnableSnowCover && player && !Util::IsInterior()) {
-		const auto position = player->GetPosition();
-		const float map = snowMap.Sample(position.x * wsettings.mapScale.x + wsettings.mapOffset.x, position.y * wsettings.mapScale.y + wsettings.mapOffset.y);
-		const float environment = (position.z - settings.SnowHeightOffset + (map - 0.5f) * wsettings.mapZscale + perFrame.SeasonalAltitude) / wsettings.BlendSmoothness;
-		const float weather = timeSnowing * timeSnowing * timeSnowing * std::max(500.0f, snowingDensity) / 500.0f;
-		amount = std::clamp(std::max(environment, weather), 0.0f, 1.0f);
-	}
+	if (survivalEnabled && survivalGlobal && player && !Util::IsInterior())
+		amount = SnowAmountAt(player->GetPosition());
 	survivalSnowAmount = amount;
 	if (amount <= SurvivalSnowOff)
 		survivalSnowy.store(false, std::memory_order_relaxed);

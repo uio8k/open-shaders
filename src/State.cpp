@@ -358,7 +358,7 @@ State::TonemapOwner State::GetTonemapOwner()
 	return cachedOwner;
 }
 
-bool State::HandlePostProcessing(RE::RENDER_TARGET a_input, RE::RENDER_TARGET a_output)
+bool State::ReplacesTonemap(RE::RENDER_TARGET a_output)
 {
 #if defined(ENABLE_EFFECTS11)
 	// VR-only: world-space menus need vanilla's kMENUBG compositor handoff, which
@@ -366,8 +366,17 @@ bool State::HandlePostProcessing(RE::RENDER_TARGET a_input, RE::RENDER_TARGET a_
 	if (globals::game::isVR && a_output == RE::RENDER_TARGETS::kMENUBG)
 		return false;
 
-	if (GetTonemapOwner() != TonemapOwner::kEffects11 ||
-		!globals::features::effects11.RenderTonemap(a_input, a_output))
+	return GetTonemapOwner() == TonemapOwner::kEffects11;
+#else
+	(void)a_output;
+	return false;
+#endif
+}
+
+bool State::HandlePostProcessing(RE::RENDER_TARGET a_input, RE::RENDER_TARGET a_output)
+{
+#if defined(ENABLE_EFFECTS11)
+	if (!ReplacesTonemap(a_output) || !globals::features::effects11.RenderTonemap(a_input, a_output))
 		return false;
 
 	SetOutputRenderTarget(a_output);
@@ -477,7 +486,11 @@ void State::Reset()
 
 	// Disable "improved" snow shader, unsupported
 	if (!globals::game::isVR) {
-		RE::GetINISetting("bEnableImprovedSnow:Display")->data.b = false;
+		static RE::Setting* improvedSnow = nullptr;
+		if (!improvedSnow)
+			improvedSnow = RE::GetINISetting("bEnableImprovedSnow:Display");
+		if (improvedSnow)
+			improvedSnow->data.b = false;
 	}
 
 	activeReflections = false;
@@ -598,11 +611,9 @@ void State::Load(ConfigMode a_configMode, bool a_allowReload)
 	SceneSettingsManager::SceneLayerGuard sceneLayerGuard;
 	const bool restoring = a_configMode == ConfigMode::USER && !defaultSettingsBaseline.is_null();
 	const bool restoringDefaults = a_configMode == ConfigMode::DEFAULT && !defaultSettingsBaseline.is_null();
-	if (restoring && !FormEditSources::CanChangePacks()) {
-		logger::warn("Save pending scene and editor form edits before restoring settings");
-		return;
-	}
 	auto& catalog = UnifiedPresetCatalog::GetSingleton();
+	const auto previousFormRoots = catalog.GetActiveFormPackRoots();
+	const bool reloadFormEdits = a_configMode == ConfigMode::USER && (!restoring || FormEditSources::CanChangePacks());
 	auto* overrideManager = SettingsOverrideManager::GetSingleton();
 	const json previousCatalog{ { UnifiedPresetCatalog::kUserSettingsKey, catalog.SerializeActiveState() } };
 	const auto previousFeatureBases = featureSettingsBases;
@@ -694,6 +705,12 @@ void State::Load(ConfigMode a_configMode, bool a_allowReload)
 	if (a_configMode == ConfigMode::USER)
 		catalog.LoadActiveState(userSettings);
 	catalog.Discover();
+	if (restoring && !reloadFormEdits && previousFormRoots != catalog.GetActiveFormPackRoots()) {
+		catalog.LoadActiveState(previousCatalog);
+		catalog.SaveActiveState();
+		logger::warn("Save or discard unsaved OS Editor record edits before restoring different preset record sources");
+		return;
+	}
 	auto* baselines = BaselineManager::GetSingleton();
 	baselines->DiscoverFiles();
 	featureSettingsBases = defaultSettingsBaseline;
@@ -785,7 +802,9 @@ void State::Load(ConfigMode a_configMode, bool a_allowReload)
 		}
 
 		FeatureIssues::ScanForOrphanedFeatureINIs();
-		FormEditSources::ReloadHistoryGuard reloadHistory;
+		std::optional<FormEditSources::ReloadHistoryGuard> reloadHistory;
+		if (reloadFormEdits)
+			reloadHistory.emplace();
 		bool payloadsLoaded = true;
 		if (restoring && featureResourcesReady) {
 			try {
@@ -819,7 +838,8 @@ void State::Load(ConfigMode a_configMode, bool a_allowReload)
 
 		if (a_configMode == ConfigMode::USER) {
 			try {
-				payloadsLoaded = payloadsLoaded && SceneSettingsManager::GetSingleton()->ReloadSceneSettings() && FormEditSources::ReloadActivePack();
+				payloadsLoaded = payloadsLoaded && SceneSettingsManager::GetSingleton()->ReloadSceneSettings() &&
+				                 (!reloadFormEdits || FormEditSources::ReloadActivePack());
 			} catch (const std::exception& error) {
 				logger::error("Could not reload preset payloads: {}", error.what());
 				payloadsLoaded = false;
@@ -861,14 +881,16 @@ void State::Load(ConfigMode a_configMode, bool a_allowReload)
 			restore("settings bases", [&] { overrideManager->CaptureBaseSettings(previousOverrideBase); return true; });
 			restore("applied settings", [&] { overrideManager->CaptureAppliedSettings(previousApplied); return true; });
 			restore("scene settings", [] { return SceneSettingsManager::GetSingleton()->ReloadSceneSettings(); });
-			restore("editor form sources", [] { return FormEditSources::ReloadActivePack(); });
+			if (reloadFormEdits)
+				restore("editor form sources", [] { return FormEditSources::ReloadActivePack(); });
 			return;
 		}
 		if (restoringDefaults)
 			CheckSettingsChanged();
 		else
 			MarkSettingsSaved();
-		reloadHistory.Commit();
+		if (reloadHistory)
+			reloadHistory->Commit();
 		logger::info("Loading Settings Complete");
 	} catch (const json::exception& e) {
 		logger::warn("General JSON error accessing settings: {}", e.what());
@@ -923,7 +945,11 @@ json State::BuildSettingsSnapshot()
 	json current;
 	SaveToJson(current);
 	// These menu preferences are saved independently of the global Save action.
-	current["Menu"].erase("FeatureListSort");
+	for (const auto path : SELF_SAVING_SETTINGS) {
+		const json::json_pointer pointer{ std::string(path) };
+		if (current.contains(pointer))
+			current.at(pointer.parent_pointer()).erase(pointer.back());
+	}
 	current["Menu"].erase("ShowSettingInformation");
 	auto* overrides = SettingsOverrideManager::GetSingleton();
 	const auto pending = overrides->GetPendingEdits(current);
@@ -987,6 +1013,11 @@ void State::CheckSettingsChanged(const json& persistedFields)
 		settingsChanged = true;
 		logger::error("Could not check unsaved settings: {}", e.what());
 	}
+}
+
+json State::GetUnsavedSettingsChanges()
+{
+	return savedSettingsSnapshot.is_null() ? json::array() : json::diff(savedSettingsSnapshot, BuildSettingsSnapshot());
 }
 
 bool State::ReapplyPresetLayers()
@@ -1102,6 +1133,7 @@ void State::ReapplySettingsLayers()
 
 void State::InvalidateEditsUnderBaselines(Feature* feature)
 {
+	++userEditsRevision;
 	if (feature)
 		baselineOverlapCache.erase(feature->GetName());
 	else
@@ -1541,10 +1573,8 @@ bool State::DropPresetEdits(const std::string& packId, Feature* onlyFeature, std
 	return true;
 }
 
-void State::SaveToJson(nlohmann::json& settings)
+void State::SaveCoreToJson(json& settings)
 {
-	SceneSettingsManager::SceneLayerGuard sceneLayerGuard;
-	std::lock_guard<std::mutex> lock(m_mutex);
 	const auto shaderCache = globals::shaderCache;
 
 	globals::menu->Save(settings["Menu"]);
@@ -1593,6 +1623,21 @@ void State::SaveToJson(nlohmann::json& settings)
 	settings["Favorites"] = favoriteFeatures;
 
 	settings["Version"] = Plugin::VERSION.string();
+}
+
+json State::CaptureCoreSettings()
+{
+	json settings;
+	std::lock_guard<std::mutex> lock(m_mutex);
+	SaveCoreToJson(settings);
+	return settings;
+}
+
+void State::SaveToJson(nlohmann::json& settings)
+{
+	SceneSettingsManager::SceneLayerGuard sceneLayerGuard;
+	std::lock_guard<std::mutex> lock(m_mutex);
+	SaveCoreToJson(settings);
 
 	// Save feature settings
 	for (auto* feature : Feature::GetFeatureList()) {
@@ -1831,6 +1876,26 @@ void State::Save(ConfigMode a_configMode, bool a_isExplicitUserSave)
 	}
 	if (a_configMode == ConfigMode::USER)
 		MarkSettingsSaved();
+}
+
+bool State::SaveCoreSettings(std::span<const std::string_view> paths)
+{
+	const auto configPath = GetConfigPath(ConfigMode::USER);
+	std::error_code ec;
+	const bool fileExists = std::filesystem::exists(configPath, ec);
+	if (ec)
+		return false;
+	const auto saved = fileExists ? Util::FileHelpers::ReadJsonObject(configPath, "user config") : std::optional<json>(json::object());
+	if (!saved)
+		return false;
+	const auto current = CaptureCoreSettings();
+	json patch = json::object();
+	for (const auto path : paths) {
+		const json::json_pointer pointer{ std::string(path) };
+		if (current.contains(pointer) && (!saved->contains(pointer) || saved->at(pointer) != current.at(pointer)))
+			patch[pointer] = current.at(pointer);
+	}
+	return patch.empty() || SaveFeaturePreference(patch, false);
 }
 
 bool State::SaveFeaturePreference(const json& patch, bool trackInSnapshot)
@@ -2183,6 +2248,11 @@ void State::ModifyShaderLookup(const RE::BSShader& a_shader, uint& a_vertexDescr
 										(uint32_t)SIE::ShaderCache::LightingShaderFlags::TruePbr |
 										(uint32_t)SIE::ShaderCache::LightingShaderFlags::LandscapeSeams);
 
+				using LightingFlags = SIE::ShaderCache::LightingShaderFlags;
+				constexpr auto legacyScattering = static_cast<uint32_t>(LightingFlags::SoftLighting) |
+				                                  static_cast<uint32_t>(LightingFlags::RimLighting) |
+				                                  static_cast<uint32_t>(LightingFlags::BackLighting);
+				const bool hasLegacyScattering = (a_pixelDescriptor & legacyScattering) != 0;
 				a_pixelDescriptor &= ~((uint32_t)SIE::ShaderCache::LightingShaderFlags::AmbientSpecular |
 									   (uint32_t)SIE::ShaderCache::LightingShaderFlags::ShadowDir |
 									   (uint32_t)SIE::ShaderCache::LightingShaderFlags::DefShadow |
@@ -2208,8 +2278,12 @@ void State::ModifyShaderLookup(const RE::BSShader& a_shader, uint& a_vertexDescr
 
 				a_pixelDescriptor &= ~((uint32_t)SIE::ShaderCache::LightingShaderFlags::Snow);
 
-				if (deferred->deferredPass || a_forceDeferred)
-					a_pixelDescriptor |= (uint32_t)SIE::ShaderCache::LightingShaderFlags::Deferred;
+				if (deferred->deferredPass || a_forceDeferred) {
+					a_pixelDescriptor |= (uint32_t)SIE::ShaderCache::LightingShaderFlags::Deferred | deferredLightingShaderFlags;
+					if (!hasLegacyScattering)
+						a_pixelDescriptor |= SIE::ShaderCache::kLightingNoLegacySubsurface;
+				} else if (permutationData.ExtraShaderDescriptor & static_cast<uint32_t>(ExtraShaderDescriptors::IsReflections))
+					a_pixelDescriptor |= deferredLightingShaderFlags & ~(SIE::ShaderCache::kLightingNoLocalShadowMaps | SIE::ShaderCache::kLightingNoLocalContactShadows);
 
 				{
 					uint32_t technique = 0x3F & (a_vertexDescriptor >> 24);
@@ -2246,7 +2320,12 @@ void State::ModifyShaderLookup(const RE::BSShader& a_shader, uint& a_vertexDescr
 							   (uint32_t)SIE::ShaderCache::EffectShaderFlags::GrayscaleToAlpha |
 							   (uint32_t)SIE::ShaderCache::EffectShaderFlags::IgnoreTexAlpha);
 				a_vertexDescriptor &= flags;
-				a_pixelDescriptor &= flags;
+				a_pixelDescriptor &= flags & ~(SIE::ShaderCache::kEffectLinearACEScg | SIE::ShaderCache::kEffectAmbientWorldIBL);
+				if (effectAmbientIBLUploaded &&
+					(permutationData.ExtraShaderDescriptor & static_cast<uint32_t>(ExtraShaderDescriptors::InWorld)))
+					a_pixelDescriptor |= SIE::ShaderCache::kEffectAmbientWorldIBL;
+				if (deferredLightingShaderFlags & SIE::ShaderCache::kLightingLinearACEScg)
+					a_pixelDescriptor |= SIE::ShaderCache::kEffectLinearACEScg;
 
 				if (deferred->deferredPass || a_forceDeferred)
 					a_pixelDescriptor |= (uint32_t)SIE::ShaderCache::EffectShaderFlags::Deferred;
@@ -2274,6 +2353,9 @@ void State::ModifyShaderLookup(const RE::BSShader& a_shader, uint& a_vertexDescr
 
 uint32_t State::GetRuntimePixelBits(const RE::BSShader& a_shader)
 {
+	if (a_shader.shaderType.get() == RE::BSShader::Type::Lighting)
+		return static_cast<uint32_t>(SIE::ShaderCache::LightingShaderFlags::BaseObjectIsSnow);
+
 	// Water's pixel stage branches on Wading at runtime; losing the bit skips the wading displacement without any error.
 	return a_shader.shaderType.get() == RE::BSShader::Type::Water ? static_cast<uint32_t>(SIE::ShaderCache::WaterShaderFlags::Wading) : 0u;
 }
@@ -2450,14 +2532,22 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 		data.FrameCount = frameCount * temporal;
 		data.FrameCountAlwaysActive = frameCount;
 
+		// Out-of-world refreshes (VR UI pass, upscaling) keep the last in-world tiles: zeroed tiles read as
+		// water at camera height and the VR underwater mask then floods everything below the horizon.
+		static std::array<float4, 25> waterTiles = [] {
+			std::array<float4, 25> tiles;
+			tiles.fill(float4(0.0f, 0.0f, 0.0f, -FLT_MAX));
+			return tiles;
+		}();
 		if (a_inWorld) {
 			for (int i = -2; i <= 2; i++) {
 				for (int k = -2; k <= 2; k++) {
 					int waterTile = (i + 2) + ((k + 2) * 5);
-					data.WaterData[waterTile] = Util::TryGetWaterData((float)i * 4096.0f, (float)k * 4096.0f);
+					waterTiles[waterTile] = Util::TryGetWaterData((float)i * 4096.0f, (float)k * 4096.0f);
 				}
 			}
 		}
+		std::copy(waterTiles.begin(), waterTiles.end(), data.WaterData);
 
 		// Fallback water height for the VR analytical mask when tile 12 returns the sentinel.
 		// Uses player->GetWaterHeight() (reads relevantWaterHeight from LOADED_REF_DATA) gated by

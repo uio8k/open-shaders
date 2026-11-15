@@ -7,6 +7,7 @@
 #include <dxgi.h>
 #include <dxgi1_3.h>
 #include <exception>
+#include <optional>
 
 #include "../../Buffer.h"
 #include "../../Deferred.h"
@@ -17,10 +18,62 @@
 #include "../../Utils/NvApiDrs.h"
 #include "../Upscaling.h"
 #include "CameraReprojection.h"
+#include "DLSSGDynamic.h"
+#include "DLSSGPreset.h"
 #include "DX12SwapChain.h"
 #include "FoveatedRender/Bridge.h"
 #include "FoveatedRender/Ops.h"
 #include "PerfMode.h"
+#include "Utils/Logging.h"
+
+namespace
+{
+	// Flat (SE/AE) layout of a BSGraphics::State::cameraDataCacheA entry; the universal CommonLib build compiles these fields out.
+	struct CameraStateEntry
+	{
+		RE::NiCamera* referenceCamera;
+		std::uint64_t pad08;
+		RE::BSGraphics::ViewData viewData;
+		RE::NiPoint3 posAdjust;
+		RE::NiPoint3 currentPosAdjust;
+		RE::NiPoint3 previousPosAdjust;
+		bool useJitter;
+		std::uint32_t numData;
+		std::uint32_t pad28C;
+	};
+	static_assert(offsetof(CameraStateEntry, viewData) == 0x10);
+	static_assert(offsetof(CameraStateEntry, posAdjust) == 0x260);
+	static_assert(offsetof(CameraStateEntry, previousPosAdjust) == 0x278);
+	static_assert(sizeof(CameraStateEntry) == 0x290);
+
+	/**
+	 * @brief The world camera's frame from the engine camera table, which keys entries on (camera, useJitter):
+	 * the jittered entry the scene draws with, else the unjittered one; nullopt in VR or when neither exists.
+	 */
+	std::optional<UpscalingCamera::CameraFrame> GetWorldCameraFrame()
+	{
+		const auto* camera = RE::Main::WorldRootCamera();
+		if (globals::game::isVR || !camera)
+			return std::nullopt;
+		const auto& table = globals::game::graphicsState->GetRuntimeData().cameraDataCacheA;
+		const auto* entries = reinterpret_cast<const CameraStateEntry*>(table.data());
+		const CameraStateEntry* match = nullptr;
+		for (std::uint32_t i = 0; i < table.size(); ++i) {
+			const auto& entry = entries[i];
+			if (entry.referenceCamera != camera)
+				continue;
+			match = &entry;
+			if (entry.useJitter)
+				break;
+		}
+		if (!match)
+			return std::nullopt;
+		const auto& view = match->viewData;
+		return UpscalingCamera::FromCameraTable(view.viewMat, view.viewProjMatrixUnjittered, view.previousViewProjMatrixUnjittered,
+			float3(match->posAdjust.x, match->posAdjust.y, match->posAdjust.z),
+			float3(match->previousPosAdjust.x, match->previousPosAdjust.y, match->previousPosAdjust.z));
+	}
+}
 
 void LoggingCallback(sl::LogType type, const char* msg)
 {
@@ -86,6 +139,11 @@ void Streamline::LoadInterposer()
 	triedInitialization = true;
 
 	std::filesystem::path pluginDirPath = std::filesystem::path(pluginDir);
+
+	if (renderAPI == sl::RenderAPI::eD3D12) {
+		const auto dlssgVersion = Util::GetDllVersion((pluginDirPath / L"nvngx_dlssg.dll").wstring());
+		dlssgPresetCKnownUnsupported = dlssgVersion && *dlssgVersion < kDLSSGPresetCMinimumVersion;
+	}
 
 	std::wstring interposerPath = (pluginDirPath / interposerDllName).wstring();
 	interposer = LoadLibraryW(interposerPath.c_str());
@@ -180,7 +238,7 @@ void Streamline::LoadInterposer()
 	slSetD3DDevice = reinterpret_cast<PFun_slSetD3DDevice*>(reinterpret_cast<void*>(GetProcAddress(interposer, "slSetD3DDevice")));
 
 	if (SL_FAILED(res, slInit(pref, sl::kSDKVersion))) {
-		logger::critical("[Streamline {}] Failed to initialize Streamline", instanceTag);
+		logger::critical("[Streamline {}] Failed to initialize Streamline: slInit returned {} ({})", instanceTag, magic_enum::enum_name(res), std::to_underlying(res));
 	} else {
 		initialized = true;
 		featureDLSS = false;
@@ -321,6 +379,7 @@ void Streamline::PostDevice()
 			if (!featureDLSSG) {
 				logger::warn("[Streamline DX12] DLSS-G functions missing; DLSS-G runtime controls will be disabled");
 				dlssgMaxFramesToGenerate = 1;
+				dlssgDynamicSupported = false;
 			} else {
 				logger::info("[Streamline DX12] DLSS-G runtime controls are available");
 
@@ -328,9 +387,12 @@ void Streamline::PostDevice()
 				if (SL_FAILED(result, slDLSSGGetState(viewport, state, nullptr))) {
 					logger::warn("[Streamline DX12] slDLSSGGetState failed querying numFramesToGenerateMax: {}", magic_enum::enum_name(result));
 					dlssgMaxFramesToGenerate = 1;
+					dlssgDynamicSupported = false;
 				} else {
 					dlssgMaxFramesToGenerate = std::max<uint32_t>(1, state.numFramesToGenerateMax);
-					logger::info("[Streamline DX12] DLSS-G supports up to {}x frame generation", dlssgMaxFramesToGenerate + 1);
+					dlssgDynamicSupported = state.bIsDynamicMFGSupported == sl::Boolean::eTrue;
+					logger::info("[Streamline DX12] DLSS-G supports up to {}x frame generation; dynamic multi-frame generation {}",
+						dlssgMaxFramesToGenerate + 1, dlssgDynamicSupported ? "supported" : "not supported");
 				}
 			}
 
@@ -412,6 +474,34 @@ bool Streamline::IsSmoothMotionEnabledForProfile()
 	return drs.TryGetSkyrimSetting(Util::NvApiDrs::kKeySmoothMotionEnable, enableValue) && enableValue != 0;
 }
 
+bool Streamline::ApplyDLSSGPresetToDriverProfile(uint32_t a_previousPreset, uint32_t a_preset, bool a_presetCSupported)
+{
+	const auto action = DLSSGPreset::PlanProfileAction(a_previousPreset, a_preset, a_presetCSupported);
+	if (action == DLSSGPreset::ProfileAction::kNone)
+		return true;
+
+	Util::NvApiDrs::Api drs{};
+	const bool written = action == DLSSGPreset::ProfileAction::kSet ?
+	                         drs.TrySetSkyrimSetting(Util::NvApiDrs::kKeyDLSSGPreset, a_preset) :
+	                         drs.TryDeleteSkyrimSetting(Util::NvApiDrs::kKeyDLSSGPreset);
+	if (written)
+		logger::info("[Streamline DX12] DLSS-G preset {} written to the driver profile (DRS key {:#x}); applies on the next launch",
+			magic_enum::enum_name(static_cast<DLSSGPreset::Preset>(a_preset)), Util::NvApiDrs::kKeyDLSSGPreset);
+	else
+		logger::warn("[Streamline DX12] Failed to write DLSS-G preset {} to the driver profile (DRS key {:#x})",
+			magic_enum::enum_name(static_cast<DLSSGPreset::Preset>(a_preset)), Util::NvApiDrs::kKeyDLSSGPreset);
+	return written;
+}
+
+std::optional<uint32_t> Streamline::ReadDLSSGPresetFromDriverProfile()
+{
+	Util::NvApiDrs::Api drs{};
+	uint32_t value = 0;
+	if (!drs.TryGetSkyrimSetting(Util::NvApiDrs::kKeyDLSSGPreset, value))
+		return std::nullopt;
+	return value;
+}
+
 /**
  * @brief Updates and sets camera and frame constants for the current Streamline frame.
  *
@@ -425,11 +515,14 @@ bool Streamline::EnsureFrameToken()
 	if (!frameChecker.IsNewFrame())
 		return frameToken != nullptr;
 
+	static Util::OnceFlag tokenErrorLogged;
 	if (SL_FAILED(result, slGetNewFrameToken(frameToken, &globals::state->frameCount))) {
-		logger::error("[Streamline {}] Could not get frame token: {}", instanceTag, magic_enum::enum_name(result));
+		if (tokenErrorLogged.First())
+			logger::error("[Streamline {}] Could not get frame token: {}", instanceTag, magic_enum::enum_name(result));
 		frameToken = nullptr;
 		return false;
 	}
+	tokenErrorLogged.Reset();
 
 	return frameToken != nullptr;
 }
@@ -456,22 +549,25 @@ bool Streamline::CheckFrameConstants(sl::ViewportHandle p_viewport, uint32_t eye
 	slConstants.cameraNear = *globals::game::cameraNear;
 	slConstants.cameraFar = *globals::game::cameraFar;
 
-	auto viewMatrix = globals::game::frameBufferCached.GetCameraViewInverse(eyeIndex).Transpose();
-	const auto& frameBuffer = globals::game::frameBufferCached;
-	const auto& cameraPosition = frameBuffer.GetCameraPosAdjust(eyeIndex);
-	const auto& previousCameraPosition = frameBuffer.GetCameraPreviousPosAdjust(eyeIndex);
-	const auto cameraMatrices = UpscalingCamera::BuildReprojection(
-		viewMatrix,
-		frameBuffer.GetCameraViewProjUnjittered(eyeIndex).Transpose(),
-		frameBuffer.GetCameraPreviousViewProjUnjittered(eyeIndex).Transpose(),
-		float3(cameraPosition.x - previousCameraPosition.x, cameraPosition.y - previousCameraPosition.y, cameraPosition.z - previousCameraPosition.z));
+	// The per-frame camera cache holds whichever camera uploaded last, often the first-person camera, which breaks DLSS-G's background reprojection.
+	auto camera = GetWorldCameraFrame();
+	if (!camera) {
+		const auto& frameBuffer = globals::game::frameBufferCached;
+		const auto& cameraPosition = frameBuffer.GetCameraPosAdjust(eyeIndex);
+		const auto& previousCameraPosition = frameBuffer.GetCameraPreviousPosAdjust(eyeIndex);
+		camera = UpscalingCamera::FromConstantBuffer(frameBuffer.GetCameraViewInverse(eyeIndex), frameBuffer.GetCameraViewProjUnjittered(eyeIndex),
+			frameBuffer.GetCameraPreviousViewProjUnjittered(eyeIndex), float3(cameraPosition.x, cameraPosition.y, cameraPosition.z),
+			float3(previousCameraPosition.x, previousCameraPosition.y, previousCameraPosition.z));
+	}
+	const auto& viewMatrix = camera->viewInverse;
+	const auto cameraMatrices = UpscalingCamera::BuildReprojection(viewMatrix, camera->viewProjection, camera->previousViewProjection, camera->origin - camera->previousOrigin);
 
 	slConstants.cameraMotionIncluded = sl::Boolean::eTrue;
 	slConstants.cameraPinholeOffset = { 0.f, 0.f };
 	slConstants.cameraRight = { viewMatrix._11, viewMatrix._12, viewMatrix._13 };
 	slConstants.cameraUp = { viewMatrix._21, viewMatrix._22, viewMatrix._23 };
 	slConstants.cameraFwd = { viewMatrix._31, viewMatrix._32, viewMatrix._33 };
-	slConstants.cameraPos = *(sl::float3*)&globals::game::frameBufferCached.GetCameraPosAdjust(eyeIndex);
+	slConstants.cameraPos = { camera->origin.x, camera->origin.y, camera->origin.z };
 	slConstants.cameraViewToClip = std::bit_cast<sl::float4x4>(cameraMatrices.cameraViewToClip);
 	slConstants.clipToCameraView = std::bit_cast<sl::float4x4>(cameraMatrices.clipToCameraView);
 	slConstants.clipToPrevClip = std::bit_cast<sl::float4x4>(cameraMatrices.clipToPrevClip);
@@ -657,12 +753,11 @@ bool Streamline::EvaluateDLSS(sl::ViewportHandle vp, uint32_t eyeIndex,
 			return;
 		const sl::Result markerResult = slPCLSetMarker(marker, *frameToken);
 		if (markerResult != sl::Result::eOk) {
-			static bool markerErrorLogged[2][2] = { { false, false }, { false, false } };
+			static Util::OnceFlag markerErrorLogged[2][2];
 			const uint32_t logIdx = globals::game::isVR ? std::min(eyeIndex, 1u) : 0u;
 			const uint32_t boundedStageIndex = std::min(stageIndex, 1u);
-			if (markerErrorLogged[logIdx][boundedStageIndex])
+			if (!markerErrorLogged[logIdx][boundedStageIndex].First())
 				return;
-			markerErrorLogged[logIdx][boundedStageIndex] = true;
 			logger::warn(
 				"[Streamline {}] slPCLSetMarker({}) failed{}: {}",
 				instanceTag,
@@ -989,6 +1084,18 @@ void Streamline::ConfigureDLSSG(bool enabled)
 	options.flags = sl::DLSSGFlags::eRetainResourcesWhenOff;
 	options.numFramesToGenerate = std::clamp<uint32_t>(
 		globals::features::upscaling.settings.dlssgFramesToGenerate, 1, dlssgMaxFramesToGenerate);
+	const auto& upscalingSettings = globals::features::upscaling.settings;
+	if (const auto dynamic = DLSSGDynamic::Select(enabled, dlssgDynamicSupported, upscalingSettings.dlssgDynamic, upscalingSettings.dlssgDynamicTargetFPS, Upscaling::kDLSSGDynamicTargetFPSMax); dynamic.dynamic) {
+		options.mode = sl::DLSSGMode::eDynamic;
+		options.dynamicTargetFrameRate = dynamic.targetFrameRate;
+	}
+	if (upscalingSettings.streamlineLogLevel >= 2 && (options.mode != lastSentDLSSGMode || options.numFramesToGenerate != lastSentDLSSGFrames || options.dynamicTargetFrameRate != lastSentDLSSGTargetFPS)) {
+		lastSentDLSSGMode = options.mode;
+		lastSentDLSSGFrames = options.numFramesToGenerate;
+		lastSentDLSSGTargetFPS = options.dynamicTargetFrameRate;
+		logger::info("[Streamline DX12] DLSS-G options: mode={}, numFramesToGenerate={}, dynamicTargetFrameRate={}",
+			magic_enum::enum_name(options.mode), options.numFramesToGenerate, options.dynamicTargetFrameRate);
+	}
 
 	if (SL_FAILED(result, slDLSSGSetOptions(viewport, options))) {
 		static bool errorLogged = false;
@@ -1011,7 +1118,11 @@ void Streamline::ConfigureDLSSG(bool enabled)
 			return;
 		}
 		dlssgResourcesRetained = false;
+		dlssgInputFence.Reset();
 	}
+
+	if (!enabled)
+		dlssgFramesPresentedSinceConfigure = 0;
 
 	if (slDLSSGGetState && enabled) {
 		sl::DLSSGState state{};
@@ -1022,7 +1133,8 @@ void Streamline::ConfigureDLSSG(bool enabled)
 			}
 		} else {
 			lastDLSSGStatus = state.status;
-			lastDLSSGFramesPresented = state.numFramesActuallyPresented;
+			lastDLSSGFramesPresented = state.numFramesActuallyPresented + dlssgFramesPresentedSinceConfigure;
+			dlssgFramesPresentedSinceConfigure = 0;
 
 			static sl::DLSSGStatus lastLoggedStatus = sl::DLSSGStatus::eOk;
 			if (state.status != sl::DLSSGStatus::eOk && state.status != lastLoggedStatus) {
@@ -1038,11 +1150,41 @@ void Streamline::ConfigureDLSSG(bool enabled)
 			if (globals::features::upscaling.settings.streamlineLogLevel >= 2) {
 				static uint32_t callCount = 0;
 				if (++callCount % 120 == 0) {
-					logger::info("[Streamline DX12] DLSS-G presented {} frames since last query (requested {}x)",
-						state.numFramesActuallyPresented, options.numFramesToGenerate + 1);
+					logger::info("[Streamline DX12] DLSS-G presented {} frames since last query (mode={}, requested {}x)",
+						state.numFramesActuallyPresented, magic_enum::enum_name(options.mode), options.numFramesToGenerate + 1);
 				}
 			}
 		}
+	}
+}
+
+void Streamline::TrackDLSSGInputFence()
+{
+	if (!initialized || !slDLSSGGetState || !dlssgResourcesRetained)
+		return;
+
+	sl::DLSSGState state{};
+	if (SL_FAILED(result, slDLSSGGetState(viewport, state, nullptr))) {
+		dlssgInputTargetStale = true;
+		return;
+	}
+
+	dlssgInputFence.Track(static_cast<ID3D12Fence*>(state.inputsProcessingCompletionFence), state.lastPresentInputsProcessingCompletionFenceValue);
+	dlssgInputTargetStale = false;
+	++dlssgInputTargetsTracked;
+	dlssgFramesPresentedSinceConfigure += state.numFramesActuallyPresented;
+}
+
+void Streamline::QueueWaitForDLSSGInputs(ID3D12CommandQueue* a_queue)
+{
+	auto* fence = dlssgInputFence.GetFence();
+	if (!a_queue || !fence || !dlssgResourcesRetained || !dlssgInputFence.IsBehind(fence->GetCompletedValue()))
+		return;
+
+	if (FAILED(a_queue->Wait(fence, dlssgInputFence.GetTarget()))) {
+		static bool errorLogged = false;
+		if (!std::exchange(errorLogged, true))
+			logger::warn("[Streamline DX12] Could not queue a wait on the DLSS-G input fence");
 	}
 }
 
