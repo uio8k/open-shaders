@@ -15,6 +15,7 @@
 #include <cmath>
 #include <d3dcompiler.h>
 #include <fstream>
+#include <future>
 #include <mutex>
 #include <unordered_map>
 
@@ -28,6 +29,7 @@
 #include "Utils/GenerationClaim.h"
 #include "Utils/Logging.h"
 #include "Utils/ShaderCacheManifest.h"
+#include "Utils/ShaderCompileFlags.h"
 #include "Utils/ShaderContentStore.h"
 #include "Utils/StandaloneShaderCacheKey.h"
 #include "Utils/StringUtils.h"
@@ -2328,6 +2330,11 @@ namespace SIE
 			}
 			if (globals::state->enableAvoidFlowControl.load(std::memory_order_relaxed)) {
 				flags |= D3DCOMPILE_AVOID_FLOW_CONTROL;
+			}
+			if (Util::ShaderCompileFlags::SkipsOptimization(
+					shaderClass == ShaderClass::Pixel && type == RE::BSShader::Type::Lighting, debugCompile,
+					(flags & D3DCOMPILE_PARTIAL_PRECISION) != 0, (flags & D3DCOMPILE_AVOID_FLOW_CONTROL) != 0)) {
+				flags = (flags & ~D3DCOMPILE_OPTIMIZATION_LEVEL3) | D3DCOMPILE_SKIP_OPTIMIZATION;
 			}
 			if (useDiskCache) {
 				flags |= D3DCOMPILE_SKIP_VALIDATION;
@@ -4891,6 +4898,26 @@ namespace SIE
 		return { ContentStoreDisplayPath(), usage.blobs, usage.bytes, ContentStoreMaxBytes() };
 	}
 
+	static std::atomic<bool> g_contentStoreUsageStale{ true };
+
+	std::optional<ShaderCache::ContentStoreUsage> ShaderCache::GetCachedContentStoreUsage()
+	{
+		constexpr auto kRefreshInterval = std::chrono::seconds(5);
+		static std::mutex mutex;
+		static std::optional<ContentStoreUsage> usage;
+		static std::future<ContentStoreUsage> pending;
+		static std::chrono::steady_clock::time_point lastRefresh;
+		std::scoped_lock lock(mutex);
+		if (pending.valid() && pending.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+			usage = pending.get();
+		const auto now = std::chrono::steady_clock::now();
+		if (!pending.valid() && (g_contentStoreUsageStale.exchange(false) || now - lastRefresh >= kRefreshInterval)) {
+			pending = std::async(std::launch::async, [this] { return GetContentStoreUsage(); });
+			lastRefresh = now;
+		}
+		return usage;
+	}
+
 	void ShaderCache::ApplyContentStoreLimit()
 	{
 		auto* store = g_openedContentStore.load();
@@ -4898,8 +4925,12 @@ namespace SIE
 			return;
 		const auto maxBytes = ContentStoreMaxBytes();
 		store->SetMaxBytes(maxBytes);
+		g_contentStoreUsageStale = true;
 		// Walking and deleting can take a while on a large store; the store outlives the plugin, so detach.
-		std::thread([store, maxBytes] { store->Trim(maxBytes); }).detach();
+		std::thread([store, maxBytes] {
+			store->Trim(maxBytes);
+			g_contentStoreUsageStale = true;
+		}).detach();
 	}
 
 	void ShaderCache::ClearContentStore()
@@ -4910,6 +4941,7 @@ namespace SIE
 			store->Clear(ec);
 		else
 			std::filesystem::remove_all(ContentStorePath(), ec);
+		g_contentStoreUsageStale = true;
 		if (ec)
 			logger::warn("Failed to clear the persistent shader store: {}", ec.message());
 	}

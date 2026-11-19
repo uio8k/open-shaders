@@ -136,7 +136,11 @@ VS_OUTPUT main(VS_INPUT input)
 		input.InstanceID
 #	endif
 	);
+#	if defined(LOD_OBJECT)
+	const bool treeBendEnabled = false;
+#	else
 	const bool treeBendEnabled = (Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::TreeBend) != 0;
+#	endif
 
 #	if (defined(RENDER_DEPTH) && defined(RENDER_SHADOWMASK_ANY)) || SHADOWFILTER == 2
 	vsout.PositionCS.xy = input.PositionMS.xy;
@@ -278,7 +282,7 @@ VS_OUTPUT main(VS_INPUT input)
 	texCoord.xy = input.TexCoord * TexcoordOffset.zw + TexcoordOffset.xy;
 
 #			if defined(RENDER_NORMAL)
-	texCoord.z = max(1, 0.0013333333 * positionCS.z + 0.8);
+	texCoord.z = max(1, 0.0013333333 * FrameBuffer::ToStandardClipZ(positionCS) + 0.8);
 
 	float falloff = 1;
 #				if defined(RENDER_NORMAL_FALLOFF)
