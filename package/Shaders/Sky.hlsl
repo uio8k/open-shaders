@@ -11,6 +11,10 @@
 #include "Common/SharedData.hlsli"
 #include "Common/VR.hlsli"
 
+#if defined(PROCEDURAL_AURORA)
+#	include "ProceduralAurora/ProceduralAurora.hlsli"
+#endif
+
 #if defined(PROCEDURAL_SUN)
 #	include "ProceduralSun/ProceduralSun.hlsli"
 
@@ -85,6 +89,10 @@ struct VS_OUTPUT
 	uint EyeIndex: EYEIDX0;
 #endif  // VR
 };
+
+// Matches the engine's rasterizer depth bias for these passes, which a float reverse-Z buffer cannot apply.
+static const float MoonMaskBiasUnits = 3.0;
+static const float MoonBiasUnits = 9.0;
 
 #ifdef VSHADER
 cbuffer PerGeometry : register(b2)
@@ -213,7 +221,14 @@ VS_OUTPUT main(VS_INPUT input)
 
 #	ifdef REVERSE_Z
 	float4 skyPosition = mul(WorldViewProj[eyeIndex], inputPosition);
-	vsout.Position = float4(skyPosition.xy, FrameBuffer::FarPlaneClipZ(skyPosition.w), skyPosition.w);
+#		if defined(MOONMASK)
+	float skyBiasUnits = MoonMaskBiasUnits;
+#		elif defined(TEX)
+	float skyBiasUnits = (Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::IsMoon) ? MoonBiasUnits : 0.0;
+#		else
+	float skyBiasUnits = 0.0;
+#		endif
+	vsout.Position = float4(skyPosition.xy, FrameBuffer::FarPlaneClipZNearer(skyPosition.w, skyBiasUnits), skyPosition.w);
 #	else
 	vsout.Position = mul(WorldViewProj[eyeIndex], inputPosition).xyww;
 #	endif
@@ -248,6 +263,9 @@ struct PS_OUTPUT
 	float4 Normal: SV_Target2;
 #if defined(CLOUD_SHADOWS) && defined(CLOUDS) && !defined(DEFERRED)
 	float4 CloudShadows: SV_Target3;
+#endif
+#if defined(REVERSE_Z) && defined(CLOUDS)
+	float Depth: SV_Depth;
 #endif
 };
 
@@ -439,6 +457,10 @@ PS_OUTPUT main(PS_INPUT input)
 	}
 	baseColor = PParams.xxxx * (-baseColor + blendColor) + baseColor;
 #		endif
+#		if defined(CLOUDS) && defined(EFFECTS11)
+	float3 unrelitCloudTexture = baseColor.xyz;
+#		endif
+
 #		if defined(CR_CLOUDS)
 	if (SharedData::cloudRelightSettings.enabled) {
 		if (composeAuthoredSky)
@@ -566,6 +588,21 @@ PS_OUTPUT main(PS_INPUT input)
 #				endif
 	psout.Color.xyz = ComposeSkyColor(skyGradientColor + noiseGrad, 1.0, skyScale, ENABLE_LL);
 	psout.Color.xyz *= skyBrightnessMultiplier;
+
+#				if defined(PROCEDURAL_AURORA)
+	// Drawn on the sky dome so stars, moons and clouds still draw over it.
+	const float3 auroraDirection = normalize(input.WorldPosition.xyz);
+	const float auroraPixelAngle = length(fwidth(auroraDirection));
+	[branch] if (SharedData::proceduralAuroraSettings.Enabled && SharedData::proceduralAuroraSettings.Atmosphere.x > 0.0 && auroraDirection.z > -0.03)
+	{
+		float3 aurora = Color::AuthoredColor(ProceduralAurora::Render(auroraDirection, auroraPixelAngle));
+#					if defined(EFFECTS11)
+		[branch] if (SharedData::enbSettings.Enable)
+			aurora = pow(max(aurora, 0.0), SharedData::enbSettings.AuroraCurve) * SharedData::enbSettings.AuroraIntensity;
+#					endif
+		psout.Color.xyz += aurora;
+	}
+#				endif
 	psout.Color.w = input.Color.w;
 #			endif  // TEX
 
@@ -605,7 +642,7 @@ PS_OUTPUT main(PS_INPUT input)
 		{
 			float3 viewDirection = normalize(input.WorldPosition.xyz);
 			float cloudTextureAlpha = saturate(baseColor.w);
-			float cloudTextureBrightness = max(dot(baseColor.xyz, 1.0 / 3.0), 0.0);
+			float cloudTextureBrightness = max(dot(unrelitCloudTexture, 1.0 / 3.0), 0.0);
 			float cloudTextureGray = pow(cloudTextureBrightness, SharedData::enbSettings.CloudsCurve);
 
 			float3 cloudColor = pow(max(ComposeSkyColor(input.Color.xyz, baseColor.xyz, 0.0, composeAuthoredSky), 0.0), SharedData::enbSettings.CloudsCurve);
@@ -727,6 +764,11 @@ PS_OUTPUT main(PS_INPUT input)
 
 #	if defined(IBL) && !defined(DEFERRED)
 	psout.ReflectionRadiance = psout.Color;
+#	endif
+
+#	if defined(REVERSE_Z) && defined(CLOUDS)
+	// Do not move this into a clip-z offset: the cloud dome crosses the camera plane and clips to depth 1.0.
+	psout.Depth = FrameBuffer::IsReverseProjection() ? MoonBiasUnits * FrameBuffer::DepthBiasUnit24 : input.Position.z;
 #	endif
 
 	return psout;

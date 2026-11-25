@@ -151,7 +151,9 @@ public:
 		uint EnableLightsVisualisation;
 		uint LightsVisualisationMode;
 		uint EnableParticleContactShadows;
-		uint pad1;
+		uint ClusteredLightCount;
+		float SoftShadowScale;
+		uint pad0[3];
 	};
 	STATIC_ASSERT_ALIGNAS_16(PerFrame);
 	// Compile-time size lock catches CPU/GPU cbuffer layout drift. STATIC_ASSERT_ALIGNAS_16
@@ -161,7 +163,7 @@ public:
 	// SharedData::LightLimitFixSettings in package/Shaders/Common/SharedData.hlsli
 	// (embedded in the shared FeatureData cbuffer at b6), and must match this layout
 	// field-for-field. Update both sides when the layout changes, then bump this constant.
-	static_assert(sizeof(PerFrame) == 64,
+	static_assert(sizeof(PerFrame) == 80,
 		"LightLimitFix::PerFrame layout drifted -- update SharedData::LightLimitFixSettings in package/Shaders/Common/SharedData.hlsli to match, then update this assert.");
 
 	/** @brief Populates and returns the per-frame constant buffer data for light visualization settings. */
@@ -519,6 +521,9 @@ public:
 		/// Hair takes the directional shadow the deferred pass computed instead of the engine's cheaper forward lookup, so it is lit by the sun like the rest of the scene.
 		bool SunLitHair = true;
 
+		/// Widens a point light's shadow edge with the distance between caster and receiver, sized by the light's own size; 0 keeps every edge hard.
+		float SoftShadowScale = 0.0f;
+
 		// Particle Lights.
 		bool EnableParticleLights = true;
 		bool EnableParticleLightsCulling = true;
@@ -554,7 +559,7 @@ public:
 	void BSLightingShader_SetupGeometry_GeometrySetupConstantPointLights(RE::BSRenderPass* a_pass);
 
 	/** @brief Post-geometry setup: uploads the strict light constant buffer to the GPU if changed. */
-	bool BSLightingShader_SetupGeometry_After(RE::BSRenderPass* a_pass);
+	void BSLightingShader_SetupGeometry_After(RE::BSRenderPass* a_pass);
 
 	eastl::hash_map<RE::NiNode*, uint8_t> roomNodes;
 

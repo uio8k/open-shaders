@@ -20,6 +20,7 @@ namespace Permutation
 	namespace LightingTechnique
 	{
 		static const uint Glowmap = 2;
+		static const uint TreeAnim = 12;
 	}
 
 	namespace LightingFlags
@@ -89,6 +90,8 @@ namespace Permutation
 		static const uint IsHeldWeapon = (1u << 29);
 		static const uint GammaRenderTarget = (1u << 27);
 		static const uint CaptureReflectionRadiance = (1u << 26);
+		static const uint MenuItem = (1u << 20);
+		static const uint CarriedShadowLight = (1u << 19);
 #if defined(SNOW_COVER) && defined(PSHADER)
 		static const uint NoSnow = (1u << 25);
 		static const uint NoFoliageTint = (1u << 24);

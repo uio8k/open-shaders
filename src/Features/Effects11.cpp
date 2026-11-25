@@ -5,6 +5,7 @@
 #include "Effects11/ENBHelper.h"
 #include "Effects11/Editor/Effects11Editor.h"
 #include "Effects11/EffectManager.h"
+#include "Effects11/Overlays/PresetOverlays.h"
 #include "Effects11/PresetManager.h"
 #include "Effects11/SettingManager.h"
 #include "Effects11/WeatherManager.h"
@@ -19,6 +20,7 @@
 #include "PostProcessingMode.h"
 #include "Presets/PresetProvider.h"
 #include "Presets/UnifiedPresetCatalog.h"
+#include "ProceduralAurora.h"
 #include "ShaderCache.h"
 #include "SkySync.h"
 #include "State.h"
@@ -481,8 +483,7 @@ namespace
 	{
 		auto& settingManager = SettingManager::GetSingleton();
 		auto& effectManager = EffectManager::GetSingleton();
-		settingManager.Save();
-		effectManager.Save();
+		Overlays::Manager::GetSingleton().SavePreset();
 		settingManager.Load();
 		effectManager.Apply();
 	}
@@ -601,8 +602,10 @@ Effects11::PerFrame Effects11::GetCommonBufferData()
 	data.StarsAnimationTime = settingManager.GetValue<float>("StarsAnimationTime", "SKY");
 	data.StarsAnimationDensity = settingManager.GetValue<float>("StarsAnimationDensity", "SKY");
 	data.StarsAnimationIntensity = settingManager.GetValue<float>("StarsAnimationIntensity", "SKY");
-	data.AuroraIntensity = settingManager.GetInterpolatedTimeOfDayValue("AuroraBorealisIntensity", "SKY");
-	data.AuroraCurve = settingManager.GetInterpolatedTimeOfDayValue("AuroraBorealisCurve", "SKY");
+	// The procedural aurora passes through unchanged so only its own settings shape it
+	const bool proceduralAurora = globals::features::proceduralAurora.IsActive();
+	data.AuroraIntensity = proceduralAurora ? 1.0f : settingManager.GetInterpolatedTimeOfDayValue("AuroraBorealisIntensity", "SKY");
+	data.AuroraCurve = proceduralAurora ? 1.0f : settingManager.GetInterpolatedTimeOfDayValue("AuroraBorealisCurve", "SKY");
 
 	data.VolumetricRaysDesaturation = settingManager.GetInterpolatedTimeOfDayValue("Desaturation", "GAMEVOLUMETRICRAYS");
 	auto colorFilter = settingManager.GetInterpolatedColorTimeOfDayValue("ColorFilter", "GAMEVOLUMETRICRAYS");
@@ -1708,7 +1711,7 @@ void Effects11::DrawSunRays()
 	static constexpr float maxLightNdcOffset = 2.5f;
 	float2 lightUV[2]{};
 	bool lightInView = false;
-	for (int eye = 0; eye < (globals::game::isVR ? 2 : 1); ++eye) {
+	for (uint32_t eye = 0; eye < Util::EyeCount(); ++eye) {
 		const auto viewProj = globals::game::frameBufferCached.GetCameraViewProj(eye).Transpose();
 		const auto clip = DirectX::SimpleMath::Vector4::Transform(DirectX::SimpleMath::Vector4(light.direction.x, light.direction.y, light.direction.z, 0.0f), viewProj);
 		if (clip.w <= 1e-6f)
@@ -1753,7 +1756,7 @@ void Effects11::DrawSunRays()
 	data.raysColor = GetSunRaysColor(light, lightPeak, perFrame.VolumetricRaysSkyColor);
 	data.maskBrightness = lightPeak;
 	data.maskExponent = light.maskExponent;
-	data.invScreenWidth = (globals::game::isVR ? 2.0f : 1.0f) / std::max(resolution.x, 1.0f);
+	data.invScreenWidth = static_cast<float>(Util::EyeCount()) / std::max(resolution.x, 1.0f);
 
 	Effects11Util::D3D11ScopedPostFxBackup stateBackup;
 	stateBackup.Save(context);
@@ -1825,10 +1828,6 @@ namespace
 					preset.displayName, preset.rootPath, preset.valid, preset.invalidReason, preset.isLegacy });
 			return entries;
 		}
-		std::string GetDefaultActivePackId() const override
-		{
-			return PresetManager::GetSingleton().IsLegacyActive() && globals::features::effects11.IsActive() ? "legacy:effects11" : "";
-		}
 		std::string GetPresetId(const std::string& id) const override
 		{
 			if (id == "legacy:effects11")
@@ -1851,7 +1850,7 @@ namespace
 		bool Apply(const std::string& id, bool saveCurrent) override
 		{
 			auto& manager = PresetManager::GetSingleton();
-			manager.DiscoverPresets();
+			manager.DiscoverPresets(false);
 			if (id.starts_with(kLocationPrefix)) {
 				const auto* location = manager.FindByRelativeKey(id.substr(kLocationPrefix.size()));
 				if (!location || !location->valid)
@@ -1861,10 +1860,8 @@ namespace
 						manager.ReloadActive();
 					return true;
 				}
-				if (saveCurrent && manager.CanExportActivePreset()) {
-					SettingManager::GetSingleton().Save();
-					EffectManager::GetSingleton().Save();
-				}
+				if (saveCurrent && manager.CanExportActivePreset() && !Overlays::Manager::GetSingleton().SavePreset())
+					return false;
 				manager.SetActiveLocation(location->root);
 				manager.ReloadActive();
 				return true;

@@ -1,6 +1,7 @@
 #include "PresetManager.h"
 #include "EffectManager.h"
 #include "I18n/I18n.h"
+#include "Overlays/PresetOverlays.h"
 #include "Presets/UnifiedPresetCatalog.h"
 #include "SettingManager.h"
 #include "Utils/StringUtils.h"
@@ -119,6 +120,15 @@ PresetManager& PresetManager::GetSingleton()
 
 void PresetManager::Rescan()
 {
+	ScanLocations();
+	// A rescan can drop the active preset (deleted from disk); GetENBSeriesPath() must
+	// stop pointing at it once it's no longer in discoveredLocations.
+	if (!activeRoot.empty() && !GetActiveLocation())
+		activeRoot.clear();
+}
+
+void PresetManager::ScanLocations()
+{
 	discoveredLocations.clear();
 
 	// GetDataPath() resolves against the game exe's own path (falling back to CWD only
@@ -152,11 +162,6 @@ void PresetManager::Rescan()
 	// never per-frame.
 	for (auto& location : discoveredLocations)
 		PopulateSummary(location);
-
-	// A rescan can drop the active preset (deleted from disk); GetENBSeriesPath() must
-	// stop pointing at it once it's no longer in discoveredLocations.
-	if (!activeRoot.empty() && !GetActiveLocation())
-		activeRoot.clear();
 }
 
 const std::vector<PresetLocation>& PresetManager::GetDiscoveredLocations() const
@@ -363,12 +368,13 @@ void PresetManager::ScanLibraryDirectory(const std::filesystem::path& relativePa
 	}
 }
 
-void PresetManager::DiscoverPresets()
+void PresetManager::DiscoverPresets(bool selectDefault)
 {
 	presets = ScanPresets(true);
-	Rescan();
+	ScanLocations();
 	discovered = true;
-	EnsureDefaultSelection();
+	if (selectDefault)
+		EnsureDefaultSelection();
 
 	logger::info("[Effects11] Discovered {} preset(s); active='{}'",
 		presets.size(), FormatPresetIdForLog(activePresetId));
@@ -459,12 +465,12 @@ bool PresetManager::SwitchPreset(const std::string& id, bool saveCurrent)
 	if (!target || !target->valid)
 		return false;
 
-	auto& settingManager = SettingManager::GetSingleton();
-	auto& effectManager = EffectManager::GetSingleton();
-
 	if (saveCurrent && CanExportActivePreset()) {
-		settingManager.Save();
-		effectManager.Save();
+		// Switching reloads from disk, so a failed write would lose its edits
+		if (!Overlays::Manager::GetSingleton().SavePreset()) {
+			logger::error("[Effects11] Preset switch stopped: the preset or an overlay could not be saved");
+			return false;
+		}
 	}
 
 	if (!SetActivePreset(id))
@@ -503,9 +509,9 @@ bool PresetManager::ExportActivePresetTo(const std::filesystem::path& destRoot, 
 		return false;
 	}
 
-	if (saveCurrent) {
-		SettingManager::GetSingleton().Save();
-		EffectManager::GetSingleton().Save();
+	if (saveCurrent && !Overlays::Manager::GetSingleton().SavePreset()) {
+		logger::error("[Effects11] Export failed: the preset or an overlay could not be saved");
+		return false;
 	}
 
 	std::error_code ec;

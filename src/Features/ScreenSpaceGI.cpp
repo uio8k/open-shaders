@@ -9,7 +9,9 @@
 #include "Features/VR.h"
 #include "State.h"
 #include "Util.h"
+#include "Utils/DebugSection.h"
 #include "Utils/Game.h"
+#include "Utils/RenderExtent.h"
 #include "Utils/SettingsControl.h"
 
 #define I18N_KEY_PREFIX "feature.screen_space_gi."
@@ -190,7 +192,7 @@ void ScreenSpaceGI::DrawSettings()
 				recompileFlag = true;
 			}
 			if (auto _tt = Util::HoverTooltipWrapper()) {
-				ImGui::TextUnformatted(select("1 Slice, 6 Steps, blur enabled, no GI\n", "3 Slices, 8 Steps, blur enabled, no GI\n"));
+				ImGui::TextUnformatted(select(T(TKEY("minimal_preset_tooltip"), "1 Slice, 6 Steps, blur enabled, no GI\n"), "3 Slices, 8 Steps, blur enabled, no GI\n"));
 			}
 
 			ImGui::TableNextColumn();
@@ -416,39 +418,39 @@ void ScreenSpaceGI::DrawSettings()
 			}
 		}
 	}
+}
 
+void ScreenSpaceGI::DrawDebugSection()
+{
 	// The buffer viewer has no scene-context meaning, so hide it while a Scene Manager replica
 	// is borrowing this panel to author overrides.
 	if (SettingsControl::IsReplicating())
 		return;
 
-	///////////////////////////////
-	ImGui::SeparatorText(T(TKEY("debug"), "Debug"));
+	Util::DebugSection section;
+	if (!section)
+		return;
 
-	if (globals::game::isVR && showAdvanced) {
+	if (globals::game::isVR) {
 		ImGui::Checkbox(T(TKEY("debug_unjittered_vr"), "Use Unjittered VR Camera"), &settings.DebugUseUnjitteredCameraReconstruction);
 		if (auto _tt = Util::HoverTooltipWrapper()) {
 			ImGui::Text("%s", T(TKEY("debug_unjittered_vr_tooltip"), "May reduce jitter-induced depth swim during head movement. Compare against the default before enabling."));
 		}
 	}
 
-	if (ImGui::TreeNode(T(TKEY("buffer_viewer"), "Buffer Viewer"))) {
-		static float debugRescale = .3f;
-		ImGui::SliderFloat(T(TKEY("view_resize"), "View Resize"), &debugRescale, 0.f, 1.f);
+	static float debugRescale = .3f;
+	ImGui::SliderFloat(T(TKEY("view_resize"), "View Resize"), &debugRescale, 0.f, 1.f);
 
-		BUFFER_VIEWER_NODE(texNoise, debugRescale)
-		BUFFER_VIEWER_NODE(texWorkingDepth, debugRescale)
-		BUFFER_VIEWER_NODE(texPrevGeo, debugRescale)
-		BUFFER_VIEWER_NODE(texRadiance, debugRescale)
-		BUFFER_VIEWER_NODE(texAo[0], debugRescale)
-		BUFFER_VIEWER_NODE(texAo[1], debugRescale)
-		BUFFER_VIEWER_NODE(texIlY[0], debugRescale)
-		BUFFER_VIEWER_NODE(texIlY[1], debugRescale)
-		BUFFER_VIEWER_NODE(texIlCoCg[0], debugRescale)
-		BUFFER_VIEWER_NODE(texIlCoCg[1], debugRescale)
-
-		ImGui::TreePop();
-	}
+	BUFFER_VIEWER_NODE(texNoise, debugRescale)
+	BUFFER_VIEWER_NODE(texWorkingDepth, debugRescale)
+	BUFFER_VIEWER_NODE(texPrevGeo, debugRescale)
+	BUFFER_VIEWER_NODE(texRadiance, debugRescale)
+	BUFFER_VIEWER_NODE(texAo[0], debugRescale)
+	BUFFER_VIEWER_NODE(texAo[1], debugRescale)
+	BUFFER_VIEWER_NODE(texIlY[0], debugRescale)
+	BUFFER_VIEWER_NODE(texIlY[1], debugRescale)
+	BUFFER_VIEWER_NODE(texIlCoCg[0], debugRescale)
+	BUFFER_VIEWER_NODE(texIlCoCg[1], debugRescale)
 }
 
 void ScreenSpaceGI::LoadSettings(json& o_json)
@@ -549,17 +551,20 @@ void ScreenSpaceGI::SetupResources()
 		auto mainTex = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 		mainTex.texture->GetDesc(Util::AsW32(&texDesc));
 		texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+		const uint mipCount = Util::MipChainLength(texDesc.Width, texDesc.Height, 5);
+		for (uint i = 0; i < 5; ++i)
+			uavRadiance[i] = uavWorkingDepth[i] = uavNormal[i] = nullptr;
 
 		if (allocateGIResources) {
 			srvDesc.Format = uavDesc.Format = texDesc.Format = DXGI_FORMAT_R11G11B10_FLOAT;
-			texDesc.MipLevels = srvDesc.Texture2D.MipLevels = 5;
+			texDesc.MipLevels = srvDesc.Texture2D.MipLevels = mipCount;
 
 			texRadiance = eastl::make_unique<Texture2D>(texDesc, "SSGI::Radiance");
 			texRadiance->CreateSRV(srvDesc);
 			// No default UAV needed: prefilterRadiance binds per-mip UAVs via uavRadiance[].
 
 			// Create individual UAVs for each mip level for prefiltering
-			for (uint i = 0; i < 5; ++i) {
+			for (uint i = 0; i < mipCount; ++i) {
 				D3D11_UNORDERED_ACCESS_VIEW_DESC mipUavDesc = {
 					.Format = DXGI_FORMAT_R11G11B10_FLOAT,
 					.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D,
@@ -599,12 +604,12 @@ void ScreenSpaceGI::SetupResources()
 		texDesc.MiscFlags &= ~D3D11_RESOURCE_MISC_GENERATE_MIPS;
 		// gi.cs.hlsl's depth-edge offset assumes FP32 working depth whenever reverse-Z is active.
 		texDesc.Format = srvDesc.Format = uavDesc.Format = globals::features::reverseZ.IsActive() ? DXGI_FORMAT_R32_FLOAT : DXGI_FORMAT_R16_FLOAT;
-		texDesc.MipLevels = srvDesc.Texture2D.MipLevels = 5;
+		texDesc.MipLevels = srvDesc.Texture2D.MipLevels = mipCount;
 
 		{
 			texWorkingDepth = eastl::make_unique<Texture2D>(texDesc, "SSGI::WorkingDepth");
 			texWorkingDepth->CreateSRV(srvDesc);
-			for (int i = 0; i < 5; ++i) {
+			for (uint i = 0; i < mipCount; ++i) {
 				uavDesc.Texture2D.MipSlice = i;
 				DX::ThrowIfFailed(device->CreateUnorderedAccessView(texWorkingDepth->resource.get(), &uavDesc, uavWorkingDepth[i].put()));
 				Util::SetResourceName(uavWorkingDepth[i].get(), "SSGI::WorkingDepth UAV mip%d", i);
@@ -615,7 +620,7 @@ void ScreenSpaceGI::SetupResources()
 		{
 			texNormal = eastl::make_unique<Texture2D>(texDesc, "SSGI::Normal");
 			texNormal->CreateSRV(srvDesc);
-			for (uint i = 0; i < 5; ++i) {
+			for (uint i = 0; i < mipCount; ++i) {
 				uavDesc.Texture2D.MipSlice = i;
 				DX::ThrowIfFailed(device->CreateUnorderedAccessView(texNormal->resource.get(), &uavDesc, uavNormal[i].put()));
 				Util::SetResourceName(uavNormal[i].get(), "SSGI::Normal UAV mip%u", i);

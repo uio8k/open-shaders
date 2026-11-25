@@ -9,6 +9,7 @@
 #include "ShaderCache.h"
 #include "State.h"
 #include "Util.h"
+#include "Utils/Game.h"
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	Vignette::Settings,
@@ -24,7 +25,7 @@ void Vignette::DrawSettings()
 		// Vignette focal length is relative to the image width, i.e. the
 		// horizontal sensor extent.
 		focalLength = std::clamp(cam->FocalLengthMM / std::max(cam->EffectiveSensorWidthMM, 0.1f), 0.1f, 2.0f);
-		ImGui::TextDisabled("%s", T("feature.post_processing.controlled_by_cinematic_camera", "Lens and focus are currently controlled by Cinematic Camera."));
+		DrawCameraControlledNote();
 	}
 
 	ImGui::BeginDisabled(cam != nullptr);
@@ -139,7 +140,7 @@ void Vignette::Draw(TextureInfo& inout_tex)
 	float2 res = { (float)texOutput->desc.Width, (float)texOutput->desc.Height };
 	res = Util::ConvertToDynamic(res);
 	// In VR, res.x spans both packed eyes; the ellipse shape must use one eye's width.
-	float eyeWidth = globals::game::isVR ? res.x * 0.5f : res.x;
+	float eyeWidth = Util::EyeWidth(res.x);
 	VignetteCB data = {
 		.settings = effective,
 		.AspectRatio = res.y / eyeWidth / effective.Anamorphism,

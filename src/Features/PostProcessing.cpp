@@ -11,21 +11,36 @@
 #include "Presets/PresetProvider.h"
 #include "imgui_stdlib.h"
 
+#include "CSEditor/SceneManager/SceneSettingsManager.h"
 #include "Globals.h"
 #include "Menu.h"
+#include "Menu/Fonts.h"
 #include "Profiler.h"
 #include "State.h"
 #include "Util.h"
+#include "Utils/RenderExtent.h"
+#include "Utils/SettingsControl.h"
 #include "Utils/SettingsPatch.h"
 
 #include "Features/PostProcessing/PostProcessingUI.h"
 #include "Features/Upscaling.h"
 
 #include <algorithm>
-#include <format>
+#include <array>
 
 namespace
 {
+	constexpr std::array kPointerButtons{ ImGuiMouseButton_Left, ImGuiMouseButton_Right, ImGuiMouseButton_Middle };
+	constexpr std::array kActivateKeys{ ImGuiKey_Enter, ImGuiKey_KeypadEnter, ImGuiKey_Space, ImGuiKey_GamepadFaceDown };
+
+	/** @brief Whether this frame's input could activate a control, so idle frames skip the settings diff. */
+	bool InputMayEditSettings()
+	{
+		return ImGui::IsAnyItemActive() ||
+		       std::ranges::any_of(kPointerButtons, [](auto button) { return ImGui::IsMouseClicked(button) || ImGui::IsMouseReleased(button); }) ||
+		       std::ranges::any_of(kActivateKeys, [](auto key) { return ImGui::IsKeyPressed(key); });
+	}
+
 	bool skipVanillaDoF = false;
 	bool skipVanillaBloom = false;
 	std::optional<bool> savedVanillaLensFlare;
@@ -72,6 +87,7 @@ namespace
 			return true;
 		case Index::MotionBlur:
 		case Index::PhysicalGlare:
+		case Index::PhysicalLens:
 		case Index::LUT:
 		case Index::Camera:
 		case Index::Border:
@@ -82,11 +98,25 @@ namespace
 	}
 }
 
+PostProcessFeature* PostProcessing::GetOpenEffectWithDebug() const
+{
+	if (activeSettingsPage != SettingsPage::SubFeature || activePipelineFeature >= pipeline.size())
+		return nullptr;
+	auto* feat = pipeline[activePipelineFeature].get();
+	return feat && feat->IsActive() && feat->HasDebugSection() ? feat : nullptr;
+}
+
 void PostProcessing::DrawSettings()
 {
+	json before;
+	// Unbound widgets (buttons, popup combos) bypass the interceptor, so a diff is their only edit signal.
+	const bool watchEdits = !SettingsControl::IsReplicating() && InputMayEditSettings();
+	if (watchEdits)
+		SaveSettings(before);
+
 	PostProcessingMode::DrawSelector();
 
-	ImGui::Separator();
+	ImGui::Spacing();
 
 	// The pipeline only runs in its own mode, so its controls would do nothing in the others.
 	const auto mode = PostProcessingMode::Get();
@@ -109,6 +139,22 @@ void PostProcessing::DrawSettings()
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::TextUnformatted(T("feature.post_processing.cinematic_camera.exposure_required", "Exposure processing is required by Cinematic Camera. Disable Cinematic Camera to restore the saved enable state."));
 		return true;
+	};
+
+	// Sub-page header: the way back, then the page title and its description.
+	auto drawSubPageHeader = [&](const char* title, const char* description) {
+		if (Util::LabeledButton("##BackToPipeline", Icons::TI(ICON_TI_ARROW_LEFT),
+				T("feature.post_processing.back_to_pipeline", "Back to Pipeline")))
+			activeSettingsPage = SettingsPage::Pipeline;
+		ImGui::Spacing();
+		{
+			MenuFonts::FontRoleGuard heading(Menu::FontRole::Heading);
+			ImGui::TextUnformatted(title);
+		}
+		if (description && description[0])
+			Util::SettingHint(description, false);
+		ImGui::Separator();
+		ImGui::Spacing();
 	};
 
 	if (activeSettingsPage == SettingsPage::Pipeline) {
@@ -145,183 +191,94 @@ void PostProcessing::DrawSettings()
 				ImGui::Text("%s", displayName.c_str());
 				if (auto _tt = Util::HoverTooltipWrapper())
 					ImGui::Text("%s", description.c_str());
+				if (feat->IsExperimental()) {
+					ImGui::SameLine();
+					Util::Badge(T("feature.post_processing.experimental_badge", "Experimental"), Util::Colors::GetWarning(), { .rowHeight = ImGui::GetFrameHeight() });
+				}
 				ImGui::PopID();
 			}
 		}
 	} else if (activeSettingsPage == SettingsPage::SubFeature) {
-		if (Util::LabeledButton("##BackToPipeline", Icons::TI(ICON_TI_ARROW_LEFT),
-				T("feature.post_processing.back_to_pipeline", "Back to Pipeline"))) {
-			activeSettingsPage = SettingsPage::Pipeline;
-		}
-		ImGui::Separator();
-		if (activePipelineFeature >= 0 && activePipelineFeature < pipeline.size()) {
+		if (activePipelineFeature >= 0 && activePipelineFeature < pipeline.size() && pipeline[activePipelineFeature]) {
 			auto& feat = pipeline[activePipelineFeature];
-			if (feat) {
-				auto displayName = feat->GetDisplayName();
-				auto description = feat->GetDesc();
-				ImGui::PushID(feat->GetType().c_str());
+			auto displayName = feat->GetDisplayName();
+			auto description = feat->GetDesc();
+			ImGui::PushID(feat->GetType().c_str());
 
-				ImGui::SeparatorText(displayName.c_str());
-				ImGui::TextWrapped("%s", description.c_str());
+			// Recompiling is a troubleshooting action, so it sits quietly at the header's right
+			const float headerTop = ImGui::GetCursorPosY();
+			drawSubPageHeader(displayName.c_str(), description.c_str());
+			const float headerBottom = ImGui::GetCursorPosY();
+			ImGui::SetCursorPos(ImVec2(ImGui::GetContentRegionMax().x - Util::IconButtonSize(), headerTop));
+			if (Util::IconButton("##RecompileShaders", Icons::TI(ICON_TI_REFRESH),
+					T("feature.post_processing.recompile_shaders_for_this_sub_feature_only", "Recompile shaders for this sub-feature only.")))
+				feat->ClearShaderCache();
+			ImGui::SetCursorPosY(headerBottom);
 
-				ImGui::Spacing();
-				if (Util::LabeledButton("##RecompileShaders", Icons::TI(ICON_TI_REFRESH),
-						T("feature.post_processing.recompile_shaders", "Recompile Shaders"))) {
-					feat->ClearShaderCache();
-				}
-				if (auto _tt = Util::HoverTooltipWrapper())
-					ImGui::Text("%s", T("feature.post_processing.recompile_shaders_for_this_sub_feature_only", "Recompile shaders for this sub-feature only."));
-				ImGui::Separator();
-				ImGui::Spacing();
-				if (!drawForcedEnabled(T("feature.post_processing.enabled", "Enabled"), *feat))
-					ImGui::Checkbox(T("feature.post_processing.enabled", "Enabled"), &feat->enabled);
-				if (feat->IsActive()) {
-					ImGui::Indent();
-					feat->DrawSettings();
-					ImGui::Unindent();
-				} else {
-					ImGui::TextDisabled("%s", T("feature.post_processing.enable_the_feature_to_see_its_settings", "Enable the feature to see its settings."));
-				}
+			if (!drawForcedEnabled(T("feature.post_processing.enabled", "Enabled"), *feat))
+				ImGui::Checkbox(T("feature.post_processing.enabled", "Enabled"), &feat->enabled);
+			ImGui::Spacing();
+			if (feat->IsActive())
+				feat->DrawSettings();
+			else
+				Util::SettingHint(T("feature.post_processing.enable_the_feature_to_see_its_settings", "Enable the feature to see its settings."), false);
 
-				ImGui::PopID();
-			} else {
-				ImGui::TextDisabled("%s", T("feature.post_processing.selected_feature_is_not_valid", "Selected feature is not valid."));
-				activeSettingsPage = SettingsPage::Pipeline;
-			}
+			ImGui::PopID();
 		} else {
 			ImGui::TextDisabled("%s", T("feature.post_processing.invalid_feature_selected_returning_to_list", "Invalid feature selected. Returning to list."));
 			activeSettingsPage = SettingsPage::Pipeline;
 		}
 	} else if (activeSettingsPage == SettingsPage::CinematicCamera) {
-		if (Util::LabeledButton("##BackToPipeline", Icons::TI(ICON_TI_ARROW_LEFT),
-				T("feature.post_processing.back_to_pipeline", "Back to Pipeline"))) {
-			activeSettingsPage = SettingsPage::Pipeline;
-		}
-		ImGui::Separator();
-		ImGui::SeparatorText(T("feature.post_processing.cinematic_camera.name", "Cinematic Camera"));
+		drawSubPageHeader(T("feature.post_processing.cinematic_camera.name", "Cinematic Camera"),
+			T("feature.post_processing.cinematic_camera.description",
+				"Controls lens, focus, exposure and FOV. Exposure processing runs automatically while the camera is active; other effects must be enabled separately."));
 
-		ImGui::TextWrapped("%s", T("feature.post_processing.cinematic_camera.description",
-									 "Controls lens, focus, exposure and FOV. Exposure processing runs automatically while the camera is active; other effects must be enabled separately."));
+		ImGui::Checkbox(T("feature.post_processing.cinematic_camera.name", "Cinematic Camera"), &cinematicCamera.settings.Enabled);
 		ImGui::Spacing();
+		if (!cinematicCamera.settings.Enabled)
+			Util::SettingHint(T("feature.post_processing.enable_the_feature_to_see_its_settings", "Enable the feature to see its settings."), false);
 
-		auto& cam = cinematicCamera;
-		ImGui::Checkbox(T("feature.post_processing.enabled", "Enabled"), &cinematicCamera.settings.Enabled);
-		if (const auto* state = cam.GetState()) {
-			const auto isoText = state->Exposure == CinematicCamera::ExposureMode::AutoISO ?
-			                         std::format("{} {:.0f}-{:.0f}", T("feature.post_processing.cinematic_camera.exposure_auto_iso", "Auto ISO"), state->MinISO, state->MaxISO) :
-			                         std::format("ISO {:.0f}", state->ISO);
-			ImGui::TextDisabled(T("feature.post_processing.cinematic_camera.summary_exposure",
-									"%s - %.1f mm - f/%.1f - %.0f deg - %s - FOV %.1f deg - %s"),
-				cam.GetFilmbackPresetName(),
-				state->FocalLengthMM,
-				state->FNumber,
-				cam.settings.Exposure.ShutterAngleDeg,
-				isoText.c_str(),
-				state->HorizontalFOVDeg,
-				cam.GetFovStateText());
-		} else if (cam.settings.Enabled) {
-			ImGui::TextDisabled("%s - %s", cam.GetFilmbackPresetName(), cam.GetFovStateText());
-		}
-
-		cinematicCamera.DrawSettings();
+		cinematicCamera.DrawSettings(GetPipelineFeature<PhysicalLens>(FeaturePipelineIndex::PhysicalLens));
 		if (cinematicCamera.settings.Enabled) {
-			ImGui::Indent();
 			if (auto* exposure = GetPipelineFeature<HistogramAutoExposure>(FeaturePipelineIndex::AutoExposure)) {
 				ImGui::SeparatorText(T("feature.post_processing.cinematic_camera.exposure_meter", "Exposure Meter"));
 				exposure->DrawCameraExposureReadout();
 			}
 
 			// Linked-effect status: which adapters are currently consuming overrides.
-			ImGui::Separator();
-			ImGui::Text("%s", T("feature.post_processing.cinematic_camera.linked_effects", "Linked Effects"));
-			auto drawLinked = [&](FeaturePipelineIndex idx, const char* fallbackName) {
-				auto& pipe = pipeline[static_cast<size_t>(idx)];
-				if (!pipe)
-					return;
-				ImGui::Bullet();
-				ImGui::Text("%s: ", pipe->GetDisplayName().empty() ? fallbackName : pipe->GetDisplayName().c_str());
-				ImGui::SameLine();
-				if (pipe->IsActive())
-					ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f), "%s", T("feature.post_processing.cinematic_camera.linked_active", "Active"));
-				else
-					ImGui::TextDisabled("%s", T("feature.post_processing.cinematic_camera.linked_disabled", "Disabled - no override"));
-			};
-			drawLinked(FeaturePipelineIndex::DoF, "Depth of Field");
-			drawLinked(FeaturePipelineIndex::LensFlare, "Lens Flare");
-			drawLinked(FeaturePipelineIndex::PhysicalGlare, "Physical Glare");
-			drawLinked(FeaturePipelineIndex::Vignette, "Vignette");
-			drawLinked(FeaturePipelineIndex::MotionBlur, "Motion Blur");
-			drawLinked(FeaturePipelineIndex::AutoExposure, "Histogram Auto Exposure");
-			drawLinked(FeaturePipelineIndex::Camera, "Camera");
-			ImGui::Unindent();
+			ImGui::SeparatorText(T("feature.post_processing.cinematic_camera.linked_effects", "Linked Effects"));
+			if (ImGui::BeginTable("##LinkedEffects", 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoPadOuterX)) {
+				auto drawLinked = [&](FeaturePipelineIndex idx, const char* fallbackName) {
+					auto& pipe = pipeline[static_cast<size_t>(idx)];
+					if (!pipe)
+						return;
+					ImGui::TableNextRow();
+					ImGui::TableNextColumn();
+					ImGui::TextUnformatted(pipe->GetDisplayName().empty() ? fallbackName : pipe->GetDisplayName().c_str());
+					ImGui::TableNextColumn();
+					if (pipe->IsActive())
+						ImGui::TextColored(Util::Colors::GetSuccess(), "%s", T("feature.post_processing.cinematic_camera.linked_active", "Active"));
+					else
+						ImGui::TextDisabled("%s", T("feature.post_processing.cinematic_camera.linked_disabled", "Disabled - no override"));
+				};
+				drawLinked(FeaturePipelineIndex::DoF, "Depth of Field");
+				drawLinked(FeaturePipelineIndex::LensFlare, "Lens Flare");
+				drawLinked(FeaturePipelineIndex::PhysicalLens, "Physical Lens");
+				drawLinked(FeaturePipelineIndex::PhysicalGlare, "Physical Glare");
+				drawLinked(FeaturePipelineIndex::Vignette, "Vignette");
+				drawLinked(FeaturePipelineIndex::MotionBlur, "Motion Blur");
+				drawLinked(FeaturePipelineIndex::AutoExposure, "Histogram Auto Exposure");
+				drawLinked(FeaturePipelineIndex::Camera, "Camera");
+				ImGui::EndTable();
+			}
 		}
 	}
 
-	ImGui::Separator();
-
-	if (Util::ShowDebugSections() && ImGui::TreeNode(T("feature.post_processing.debug", "Debug"))) {
-		if (ImGui::TreeNode(T("feature.post_processing.game_imagespace_values", "Game ImageSpace Values"))) {
-			ImGui::Text(T("feature.post_processing.base_amount", "Base Amount: %.3f"), imageSpaceManager->gameISData.baseAmount);
-			ImGui::Text("%s", T("feature.post_processing.base_data", "Base Data:"));
-			ImGui::Text("%s", T("feature.post_processing.cinematic_values", "Cinematic Values:"));
-			ImGui::Text(T("feature.post_processing.saturation_brightness_contrast_values", "Saturation: %.3f\nBrightness: %.3f\nContrast: %.3f"),
-				imageSpaceManager->gameISData.baseData.cinematic.saturation,
-				imageSpaceManager->gameISData.baseData.cinematic.brightness,
-				imageSpaceManager->gameISData.baseData.cinematic.contrast);
-
-			ImGui::Text("%s", T("feature.post_processing.hdr_values", "HDR Values:"));
-			ImGui::Text(T("feature.post_processing.hdr_values_detail", "Eye Adapt Speed: %.3f\nBloom Blur Radius: %.3f\nBloom Threshold: %.3f\nBloom Scale: %.3f\nReceive Bloom Threshold: %.3f\nWhite: %.3f\nSunlight Scale: %.3f\nSky Scale: %.3f\nEye Adapt Strength: %.3f"),
-				imageSpaceManager->gameISData.baseData.hdr.eyeAdaptSpeed,
-				imageSpaceManager->gameISData.baseData.hdr.bloomBlurRadius,
-				imageSpaceManager->gameISData.baseData.hdr.bloomThreshold,
-				imageSpaceManager->gameISData.baseData.hdr.bloomScale,
-				imageSpaceManager->gameISData.baseData.hdr.receiveBloomThreshold,
-				imageSpaceManager->gameISData.baseData.hdr.white,
-				imageSpaceManager->gameISData.baseData.hdr.sunlightScale,
-				imageSpaceManager->gameISData.baseData.hdr.skyScale,
-				imageSpaceManager->gameISData.baseData.hdr.eyeAdaptStrength);
-
-			ImGui::Text("%s", T("feature.post_processing.tint_values", "Tint Values:"));
-			ImGui::Text(T("feature.post_processing.tint_values_detail", "Tint Amount: %.3f\nTint Color: (%.3f, %.3f, %.3f)"),
-				imageSpaceManager->gameISData.baseData.tint.amount,
-				imageSpaceManager->gameISData.baseData.tint.color.red,
-				imageSpaceManager->gameISData.baseData.tint.color.green,
-				imageSpaceManager->gameISData.baseData.tint.color.blue);
-
-			ImGui::Text("%s", T("feature.post_processing.depth_of_field_values", "Depth of Field Values:"));
-			ImGui::Text(T("feature.post_processing.depth_of_field_values_detail", "DOF Strength: %.3f\nDOF Distance: %.3f\nDOF Range: %.3f\nDOF Flags: %d\nDOF Sky Blur Radius: %d"),
-				imageSpaceManager->gameISData.baseData.depthOfField.strength,
-				imageSpaceManager->gameISData.baseData.depthOfField.distance,
-				imageSpaceManager->gameISData.baseData.depthOfField.range,
-				imageSpaceManager->gameISData.baseData.depthOfField.flags,
-				static_cast<int>(imageSpaceManager->gameISData.baseData.depthOfField.skyBlurRadius.get()));
-
-			ImGui::Text(T("feature.post_processing.mod_amount", "Mod Amount: %.3f"), imageSpaceManager->gameISData.modAmount);
-			ImGui::Text("%s", T("feature.post_processing.mod_data", "Mod Data:"));
-			ImGui::Text(T("feature.post_processing.mod_fade_values_detail", "Fade Amount: %.3f\nFade Color: (%.3f, %.3f, %.3f)\nBlur Radius: %.3f\nDouble Vision Strength: %.3f\n"),
-				imageSpaceManager->gameISData.modData.data[RE::ImageSpaceModData::kFadeAmount],
-				imageSpaceManager->gameISData.modData.data[RE::ImageSpaceModData::kFadeR],
-				imageSpaceManager->gameISData.modData.data[RE::ImageSpaceModData::kFadeG],
-				imageSpaceManager->gameISData.modData.data[RE::ImageSpaceModData::kFadeB],
-				imageSpaceManager->gameISData.modData.data[RE::ImageSpaceModData::kBlurRadius],
-				imageSpaceManager->gameISData.modData.data[RE::ImageSpaceModData::kDoubleVisionStrength]);
-			ImGui::Text(T("feature.post_processing.radial_blur_values_detail", "Radial Blur Strength: %.3f\nRadial Blur Rampup: %.3f\nRadial Blur Start: %.3f\nRadial Blur Rampdown: %.3f\nRadial Blur Down Start: %.3f\nRadial Blur Center: (%.3f, %.3f)"),
-				imageSpaceManager->gameISData.modData.data[RE::ImageSpaceModData::kRadialBlurStrength],
-				imageSpaceManager->gameISData.modData.data[RE::ImageSpaceModData::kRadialBlurRampup],
-				imageSpaceManager->gameISData.modData.data[RE::ImageSpaceModData::kRadialBlurStart],
-				imageSpaceManager->gameISData.modData.data[RE::ImageSpaceModData::kRadialBlurRampdown],
-				imageSpaceManager->gameISData.modData.data[RE::ImageSpaceModData::kRadialBlurDownStart],
-				imageSpaceManager->gameISData.modData.data[RE::ImageSpaceModData::kRadialBlurCenterX],
-				imageSpaceManager->gameISData.modData.data[RE::ImageSpaceModData::kRadialBlurCenterY]);
-			ImGui::Text(T("feature.post_processing.mod_dof_values_detail", "DOF Strength: %.3f\nDOF Distance: %.3f\nDOF Range: %.3f\nDOF Mode: %d"),
-				imageSpaceManager->gameISData.modData.data[RE::ImageSpaceModData::kDOFStrength],
-				imageSpaceManager->gameISData.modData.data[RE::ImageSpaceModData::kDOFDistance],
-				imageSpaceManager->gameISData.modData.data[RE::ImageSpaceModData::kDOFRange],
-				imageSpaceManager->gameISData.modData.data[RE::ImageSpaceModData::kDOFMode]);
-			ImGui::Text(T("feature.post_processing.motion_blur_strength", "Motion Blur Strength: %.3f"), imageSpaceManager->gameISData.modData.data[RE::ImageSpaceModData::kMotionBlurStrength]);
-			ImGui::TreePop();
-		}
-		ImGui::TreePop();
+	if (watchEdits) {
+		json after;
+		SaveSettings(after);
+		if (before != after)
+			globals::sceneSettingsManager->CaptureExternalFeatureChanges(this, true);
 	}
 }
 
@@ -514,6 +471,10 @@ void PostProcessing::SetupResources()
 {
 	resourcesReady = false;
 	postProcessingOutput = nullptr;
+	D3D11_TEXTURE2D_DESC mainDesc;
+	globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].texture->GetDesc(Util::AsW32(&mainDesc));
+	if (Util::IsMinimizedExtent(mainDesc.Width, mainDesc.Height))
+		return;
 	json activeSettings;
 	SaveActiveSettings(activeSettings);
 	alternatePipeline = {};
@@ -949,7 +910,7 @@ void PostProcessing::ClearBorderMotionVectorsForFrameGen()
 
 bool PostProcessing::WantsTonemapOwnership() const
 {
-	if (bypass || !IsPipelineReady())
+	if (bypass || globals::state->IsFlatWorldMapOpen() || !IsPipelineReady())
 		return false;
 	const auto* colorGrading = static_cast<const ColorGrading*>(pipeline[static_cast<size_t>(FeaturePipelineIndex::ColorGrading)].get());
 	return !colorGrading || !colorGrading->enabled || !colorGrading->settings.enableTonemap || colorGrading->IsReadyForTonemapping();
@@ -1094,6 +1055,7 @@ void PostProcessing::BuildPipeline()
 	pipeline[static_cast<size_t>(FeaturePipelineIndex::PhysicalGlare)] = std::make_shared<PhysicalGlare>();
 	pipeline[static_cast<size_t>(FeaturePipelineIndex::CODBloom)] = std::make_shared<CODBloom>();
 	pipeline[static_cast<size_t>(FeaturePipelineIndex::LensFlare)] = std::make_shared<LensFlare>();
+	pipeline[static_cast<size_t>(FeaturePipelineIndex::PhysicalLens)] = std::make_shared<PhysicalLens>();
 	pipeline[static_cast<size_t>(FeaturePipelineIndex::Composite)] = std::make_shared<Composite>();
 	pipeline[static_cast<size_t>(FeaturePipelineIndex::Vignette)] = std::make_shared<Vignette>();
 	pipeline[static_cast<size_t>(FeaturePipelineIndex::Camera)] = std::make_shared<Camera>();

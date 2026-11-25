@@ -3,9 +3,12 @@
 #include "Features/PostProcessing.h"
 #include "GpuPass.h"
 #include "I18n/I18n.h"
+#include "Menu/MenuIcons.h"
 #include "PostProcessingUI.h"
 #include "ShaderCache.h"
 #include "Util.h"
+#include "Utils/DebugView.h"
+#include "Utils/Game.h"
 #include "Utils/SettingsControl.h"
 
 namespace
@@ -109,16 +112,18 @@ void LensFlare::DrawSettings()
 
 	ImGui::SliderFloat(T("feature.post_processing.lens_flare.intensity", "Intensity"), &settings.Intensity, 0.0f, 1.0f, "%.3f");
 	tooltip(T("feature.post_processing.lens_flare.tooltip_intensity", "Master intensity for the entire lens flare effect"));
+	ImGui::ColorEdit3(T("feature.post_processing.lens_flare.tint", "Tint"), settings.Tint.data());
+	tooltip(T("feature.post_processing.lens_flare.tooltip_tint", "Radial color gradient applied to the flare effect"));
 
+	// Threshold
+	ImGui::SeparatorText(T("feature.post_processing.lens_flare.threshold", "Threshold"));
 	ImGui::SliderFloat(T("feature.post_processing.lens_flare.threshold_ev", "Threshold (EV100)"), &settings.ThresholdEV, -7.0f, 23.0f, "%+.2f EV100");
 	tooltip(T("feature.post_processing.lens_flare.tooltip_threshold_ev", "Brightness threshold in EV100 (0 EV100 = 0.125 linear luminance)."));
 	ImGui::SliderFloat(T("feature.post_processing.lens_flare.threshold_range", "Threshold Range"), &settings.ThresholdRange, 0.01f, 5.0f, "%.3f");
 	tooltip(T("feature.post_processing.lens_flare.tooltip_threshold_range", "Fade range for the threshold cutoff"));
 
 	// Ghost Settings
-	ImGui::Spacing();
-	ImGui::TextUnformatted(T("feature.post_processing.lens_flare.ghost_settings", "Ghost Settings"));
-	ImGui::Separator();
+	ImGui::SeparatorText(T("feature.post_processing.lens_flare.ghost_settings", "Ghost Settings"));
 
 	{
 		const char* modeNames[] = {
@@ -130,7 +135,8 @@ void LensFlare::DrawSettings()
 		tooltip(T("feature.post_processing.lens_flare.tooltip_ghost_mode",
 			"Fast: procedural radial ghosts (low cost).\n"
 			"Quality: FFT convolution with bokeh shape.\n"
-			"Ultra: per-ghost kernel sizes via multi-pass FFT (expensive)."));
+			"Ultra: per-ghost kernel sizes via multi-pass FFT (expensive).\n"
+			"In VR the FFT runs once per eye, doubling its cost."));
 	}
 
 	if (settings.GhostModeInt == static_cast<int>(GhostMode::Quality) || settings.GhostModeInt == static_cast<int>(GhostMode::Ultra)) {
@@ -148,6 +154,8 @@ void LensFlare::DrawSettings()
 		if (cam)
 			apertureRotation = cam->ApertureBladeRotationDeg;
 
+		if (cam)
+			DrawCameraControlledNote();
 		ImGui::BeginDisabled(cam != nullptr);
 		{
 			const SettingsControl::ProxyScope proxy(&settings.ApertureBlades, 1.0f);
@@ -231,9 +239,7 @@ void LensFlare::DrawSettings()
 	}
 
 	// Halo Settings
-	ImGui::Spacing();
-	ImGui::TextUnformatted(T("feature.post_processing.lens_flare.halo_settings", "Halo Settings"));
-	ImGui::Separator();
+	ImGui::SeparatorText(T("feature.post_processing.lens_flare.halo_settings", "Halo Settings"));
 	ImGui::SliderFloat(T("feature.post_processing.lens_flare.halo_strength", "Halo Strength"), &settings.HaloStrength, 0.0f, 1.0f, "%.3f");
 	ImGui::SliderFloat(T("feature.post_processing.lens_flare.halo_radius", "Halo Radius"), &settings.HaloRadius, 0.0f, 1.0f, "%.3f");
 	ImGui::SliderFloat(T("feature.post_processing.lens_flare.halo_width", "Halo Width"), &settings.HaloWidth, 0.0f, 1.0f, "%.3f");
@@ -241,38 +247,36 @@ void LensFlare::DrawSettings()
 	tooltip(T("feature.post_processing.lens_flare.tooltip_halo_compression", "Fisheye distortion strength for the halo effect"));
 	ImGui::SliderFloat(T("feature.post_processing.lens_flare.halo_chroma_shift", "Halo Chroma Shift"), &settings.HaloChromaShift, 0.0f, 0.1f, "%.4f");
 
-	// Tint
-	ImGui::Spacing();
-	ImGui::TextUnformatted(T("feature.post_processing.lens_flare.color_tint", "Color Tint"));
-	ImGui::Separator();
-	ImGui::ColorEdit3(T("feature.post_processing.lens_flare.tint", "Tint"), settings.Tint.data());
-	tooltip(T("feature.post_processing.lens_flare.tooltip_tint", "Radial color gradient applied to the flare effect"));
+	if (ShouldInvalidateBokehFFT(oldSettings, settings))
+		bokehFFTDirty = true;
+}
 
-	// Debug
-	ImGui::Spacing();
-	ImGui::Separator();
-	ImGui::Spacing();
+void LensFlare::DrawDebugSection()
+{
+	auto tooltip = [](const char* text) {
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(text);
+	};
 
-	if (Util::ShowDebugSections() && ImGui::CollapsingHeader(T("feature.post_processing.lens_flare.debug", "Debug"))) {
+	{
+		Util::SectionCard card("##LensFlareOverrides", ICON_TI_ADJUSTMENTS_HORIZONTAL, T("feature.post_processing.lens_flare.debug_card_overrides", "Stage Overrides"));
 		ImGui::Checkbox(T("feature.post_processing.lens_flare.disable_threshold", "Disable Threshold"), &debugsettings.disableThreshold);
 		ImGui::Checkbox(T("feature.post_processing.lens_flare.disable_ghosts", "Disable Ghosts"), &debugsettings.disableGhosts);
 		ImGui::Checkbox(T("feature.post_processing.lens_flare.disable_blur", "Disable Blur"), &debugsettings.disableBlur);
 		ImGui::SliderInt(T("feature.post_processing.lens_flare.blur_iterations", "Blur Iterations"), &debugsettings.blurIterations, 1, 4);
 		tooltip(T("feature.post_processing.lens_flare.tooltip_blur_iterations", "Kawase blur cycles (down+up). 1 = sharp, 2+ = smoother"));
-
-		static float debugRescale = .25f;
-		const float debugTextureScale = debugRescale * Util::GetUIScale();
-		ImGui::SliderFloat(T("feature.post_processing.lens_flare.view_resize", "View Resize"), &debugRescale, 0.f, 1.f);
-		BUFFER_VIEWER_NODE_TITLE(texThreshold, T("feature.post_processing.lens_flare.buffer_threshold", "Threshold (half-res)"), debugTextureScale);
-		BUFFER_VIEWER_NODE_TITLE(texGhostHalo, T("feature.post_processing.lens_flare.buffer_ghost_halo", "Ghost + Halo (half-res)"), debugTextureScale);
-		BUFFER_VIEWER_NODE_TITLE(texBlurTemp, T("feature.post_processing.lens_flare.buffer_blur_temp", "Blur Temp (quarter-res)"), debugTextureScale);
-		if (settings.GhostModeInt >= (int)GhostMode::Quality) {
-			BUFFER_VIEWER_NODE_TITLE(texFFTResult, T("feature.post_processing.lens_flare.buffer_fft_result", "FFT Convolution Result"), debugTextureScale);
-		}
 	}
 
-	if (ShouldInvalidateBokehFFT(oldSettings, settings))
-		bokehFFTDirty = true;
+	Util::SectionCard card("##LensFlareBuffers", ICON_TI_EYE, T("feature.post_processing.lens_flare.debug_card_buffers", "Buffers"));
+	static float debugRescale = .25f;
+	const float debugTextureScale = debugRescale * Util::GetUIScale();
+	ImGui::SliderFloat(T("feature.post_processing.lens_flare.view_resize", "View Resize"), &debugRescale, 0.f, 1.f);
+	BUFFER_VIEWER_NODE_TITLE(texThreshold, T("feature.post_processing.lens_flare.buffer_threshold", "Threshold (half-res)"), debugTextureScale);
+	BUFFER_VIEWER_NODE_TITLE(texGhostHalo, T("feature.post_processing.lens_flare.buffer_ghost_halo", "Ghost + Halo (half-res)"), debugTextureScale);
+	BUFFER_VIEWER_NODE_TITLE(texBlurTemp, T("feature.post_processing.lens_flare.buffer_blur_temp", "Blur Temp (quarter-res)"), debugTextureScale);
+	if (settings.GhostModeInt >= (int)GhostMode::Quality) {
+		BUFFER_VIEWER_NODE_TITLE(texFFTResult, T("feature.post_processing.lens_flare.buffer_fft_result", "FFT Convolution Result"), debugTextureScale);
+	}
 }
 
 void LensFlare::RestoreDefaultSettings()
@@ -341,6 +345,7 @@ void LensFlare::SetupResources()
 		uint fullW = baseDesc.Width;
 		uint fullH = baseDesc.Height;
 		uint halfW = std::max(fullW / 2, 1u);
+		halfW -= halfW % Util::EyeCount();
 		uint halfH = std::max(fullH / 2, 1u);
 		uint quarterW = std::max(fullW / 4, 1u);
 		uint quarterH = std::max(fullH / 4, 1u);
@@ -734,93 +739,99 @@ void LensFlare::DrawQuality(TextureInfo& inout_tex, LensFlareCB& data)
 	}
 	bokehFFTDirty = false;
 
-	// === Step 1: Threshold scene → FFT format (RG32F, N×N) ===
-	if (fftThresholdCS) {
-		data.OutputWidth = (float)N;
-		data.OutputHeight = (float)N;
-		data.InputWidth = (float)halfW;
-		data.InputHeight = (float)halfH;
-		lensFlareCB->Update(data);
-		auto cb = lensFlareCB->CB();
-		context->CSSetConstantBuffers(1, 1, &cb);
-
-		ID3D11ShaderResourceView* srv = texThreshold->srv.get();
-		ID3D11UnorderedAccessView* uav = texFFT[0]->uav.get();
-		context->CSSetShaderResources(0, 1, &srv);
-		context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
-		context->CSSetShader(fftThresholdCS.get(), nullptr, 0);
-		context->Dispatch((N + 7) >> 3, (N + 7) >> 3, 1);
-
-		srv = nullptr;
-		uav = nullptr;
-		context->CSSetShaderResources(0, 1, &srv);
-		context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
-	}
-
-	// === Step 2: Forward FFT scene → cache in texSceneFFT ===
-	{
-		DispatchFFT(fftRowCS[fftVariant].get(), texFFT[0].get(), texFFT[1].get(), N);
-		DispatchFFT(fftColCS[fftVariant].get(), texFFT[1].get(), texSceneFFT.get(), N);
-	}
-
-	// === Step 3: Per-group convolution loop ===
 	float originalHaloStrength = data.HaloStrength;
 
-	for (int gi = 0; gi < (int)groups.size(); gi++) {
-		auto& group = groups[gi];
-
-		// Update CB for this group
-		data.KernelScale = group.kernelScale;
-		data.ActiveGhostMask = group.ghostMask;
-		if (gi > 0)
-			data.HaloStrength = 0.f;  // Halo only in first group
-
-		auto& cache = bokehFFTCache[gi];
-		PrepareBokehFFT(cache, data);
-
-		// 3b: Frequency-domain multiply (scene × bokeh)
-		if (fftMultiplyCS) {
-			std::array<ID3D11ShaderResourceView*, 2> mulSrvs = { texSceneFFT->srv.get(), cache.texture->srv.get() };
-			std::array<ID3D11UnorderedAccessView*, 1> mulUavs = { texFFT[1]->uav.get() };
-
-			context->CSSetShaderResources(0, (uint)mulSrvs.size(), mulSrvs.data());
-			context->CSSetUnorderedAccessViews(0, (uint)mulUavs.size(), mulUavs.data(), nullptr);
-			context->CSSetShader(fftMultiplyCS.get(), nullptr, 0);
-			context->Dispatch((N + 7) >> 3, (N + 7) >> 3, 1);
-
-			mulSrvs.fill(nullptr);
-			mulUavs.fill(nullptr);
-			context->CSSetShaderResources(0, (uint)mulSrvs.size(), mulSrvs.data());
-			context->CSSetUnorderedAccessViews(0, (uint)mulUavs.size(), mulUavs.data(), nullptr);
-		}
-
-		// 3c: Inverse FFT
-		DispatchFFT(fftRowInvCS[fftVariant].get(), texFFT[1].get(), texFFT[0].get(), N);
-		DispatchFFT(fftColInvCS[fftVariant].get(), texFFT[0].get(), texFFT[1].get(), N);
-
-		// 3d: Compose IFFT result → additive into texGhostHalo
-		if (auto* composeCS = gi == 0 ? fftGhostComposeFirstCS.get() : fftGhostComposeCS.get()) {
-			data.OutputWidth = (float)halfW;
-			data.OutputHeight = (float)halfH;
-			data.InputWidth = (float)N;
-			data.InputHeight = (float)N;
+	const uint eyeCount = Util::EyeCount();
+	for (uint eye = 0; eye < eyeCount; ++eye) {
+		data.EyeIndex = eye;
+		data.HaloStrength = originalHaloStrength;
+		// === Step 1: Threshold scene → FFT format (RG32F, N×N) ===
+		if (fftThresholdCS) {
+			data.OutputWidth = (float)N;
+			data.OutputHeight = (float)N;
+			data.InputWidth = (float)halfW;
+			data.InputHeight = (float)halfH;
 			lensFlareCB->Update(data);
 			auto cb = lensFlareCB->CB();
 			context->CSSetConstantBuffers(1, 1, &cb);
 
-			// t0 = IFFT result (RG32F)
-			std::array<ID3D11ShaderResourceView*, 1> srvs = { texFFT[1]->srv.get() };
-			std::array<ID3D11UnorderedAccessView*, 1> uavs = { texGhostHalo->uav.get() };
+			ID3D11ShaderResourceView* srv = texThreshold->srv.get();
+			ID3D11UnorderedAccessView* uav = texFFT[0]->uav.get();
+			context->CSSetShaderResources(0, 1, &srv);
+			context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+			context->CSSetShader(fftThresholdCS.get(), nullptr, 0);
+			context->Dispatch((N + 7) >> 3, (N + 7) >> 3, 1);
 
-			context->CSSetShaderResources(0, (uint)srvs.size(), srvs.data());
-			context->CSSetUnorderedAccessViews(0, (uint)uavs.size(), uavs.data(), nullptr);
-			context->CSSetShader(composeCS, nullptr, 0);
-			context->Dispatch((halfW + 7) >> 3, (halfH + 7) >> 3, 1);
+			srv = nullptr;
+			uav = nullptr;
+			context->CSSetShaderResources(0, 1, &srv);
+			context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+		}
 
-			srvs.fill(nullptr);
-			uavs.fill(nullptr);
-			context->CSSetShaderResources(0, (uint)srvs.size(), srvs.data());
-			context->CSSetUnorderedAccessViews(0, (uint)uavs.size(), uavs.data(), nullptr);
+		// === Step 2: Forward FFT scene → cache in texSceneFFT ===
+		{
+			DispatchFFT(fftRowCS[fftVariant].get(), texFFT[0].get(), texFFT[1].get(), N);
+			DispatchFFT(fftColCS[fftVariant].get(), texFFT[1].get(), texSceneFFT.get(), N);
+		}
+
+		// === Step 3: Per-group convolution loop ===
+
+		for (int gi = 0; gi < (int)groups.size(); gi++) {
+			auto& group = groups[gi];
+
+			// Update CB for this group
+			data.KernelScale = group.kernelScale;
+			data.ActiveGhostMask = group.ghostMask;
+			if (gi > 0)
+				data.HaloStrength = 0.f;  // Halo only in first group
+
+			auto& cache = bokehFFTCache[gi];
+			PrepareBokehFFT(cache, data);
+
+			// 3b: Frequency-domain multiply (scene × bokeh)
+			if (fftMultiplyCS) {
+				std::array<ID3D11ShaderResourceView*, 2> mulSrvs = { texSceneFFT->srv.get(), cache.texture->srv.get() };
+				std::array<ID3D11UnorderedAccessView*, 1> mulUavs = { texFFT[1]->uav.get() };
+
+				context->CSSetShaderResources(0, (uint)mulSrvs.size(), mulSrvs.data());
+				context->CSSetUnorderedAccessViews(0, (uint)mulUavs.size(), mulUavs.data(), nullptr);
+				context->CSSetShader(fftMultiplyCS.get(), nullptr, 0);
+				context->Dispatch((N + 7) >> 3, (N + 7) >> 3, 1);
+
+				mulSrvs.fill(nullptr);
+				mulUavs.fill(nullptr);
+				context->CSSetShaderResources(0, (uint)mulSrvs.size(), mulSrvs.data());
+				context->CSSetUnorderedAccessViews(0, (uint)mulUavs.size(), mulUavs.data(), nullptr);
+			}
+
+			// 3c: Inverse FFT
+			DispatchFFT(fftRowInvCS[fftVariant].get(), texFFT[1].get(), texFFT[0].get(), N);
+			DispatchFFT(fftColInvCS[fftVariant].get(), texFFT[0].get(), texFFT[1].get(), N);
+
+			// 3d: Compose IFFT result → additive into texGhostHalo
+			if (auto* composeCS = gi == 0 ? fftGhostComposeFirstCS.get() : fftGhostComposeCS.get()) {
+				data.OutputWidth = (float)halfW;
+				data.OutputHeight = (float)halfH;
+				data.InputWidth = (float)N;
+				data.InputHeight = (float)N;
+				lensFlareCB->Update(data);
+				auto cb = lensFlareCB->CB();
+				context->CSSetConstantBuffers(1, 1, &cb);
+
+				// t0 = IFFT result (RG32F)
+				std::array<ID3D11ShaderResourceView*, 1> srvs = { texFFT[1]->srv.get() };
+				std::array<ID3D11UnorderedAccessView*, 1> uavs = { texGhostHalo->uav.get() };
+
+				context->CSSetShaderResources(0, (uint)srvs.size(), srvs.data());
+				context->CSSetUnorderedAccessViews(0, (uint)uavs.size(), uavs.data(), nullptr);
+				context->CSSetShader(composeCS, nullptr, 0);
+				context->Dispatch(((halfW / eyeCount) + 7) >> 3, (halfH + 7) >> 3, 1);
+
+				srvs.fill(nullptr);
+				uavs.fill(nullptr);
+				context->CSSetShaderResources(0, (uint)srvs.size(), srvs.data());
+				context->CSSetUnorderedAccessViews(0, (uint)uavs.size(), uavs.data(), nullptr);
+			}
 		}
 	}
 
@@ -876,7 +887,7 @@ void LensFlare::Draw(TextureInfo& inout_tex)
 	}
 	data.ActiveGhostMask = enabledMask;
 	data.KernelScale = settings.KernelScale;
-	data.AspectRatio = (float)fullW / (float)fullH;
+	data.AspectRatio = Util::EyeWidth((float)fullW) / (float)fullH;
 	data.ApertureBlades = apertureBlades;
 	data.ApertureRotation = DirectX::XMConvertToRadians(apertureRotationDeg);
 	data.ApertureSize = 1.0f / std::max(fStop, 1.0f);

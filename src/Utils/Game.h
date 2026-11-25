@@ -7,6 +7,8 @@
 #include <string_view>
 #include <vector>
 
+#include "Globals.h"
+
 /**
  @def GET_INSTANCE_MEMBER
  @brief Set variable in current namespace based on instance member from GetRuntimeData or GetVRRuntimeData.
@@ -135,6 +137,16 @@ namespace Util::SceneTravel
 namespace Util
 {
 	inline constexpr float kFallbackCameraAspect = 16.0f / 9.0f;
+
+	/// Eyes packed side by side in per-frame render targets: 2 in VR, 1 flat.
+	inline uint32_t EyeCount() { return globals::game::isVR ? 2u : 1u; }
+
+	/// Width of one eye in a packed target that is `fullWidth` wide.
+	template <class T>
+	inline T EyeWidth(T fullWidth)
+	{
+		return fullWidth / static_cast<T>(EyeCount());
+	}
 
 	/**
 	 * @brief Address of the per-frame call inside the engine's main update that main-thread hooks wrap.
@@ -422,6 +434,26 @@ namespace Util
 	 * @param y Output parameter for the cell Y coordinate.
 	 */
 	void WorldToCell(const RE::NiPoint3& worldPos, int32_t& x, int32_t& y);
+
+	/** @brief Side length of an exterior cell in world units. */
+	inline constexpr float ExteriorCellSize = 4096.0f;
+
+	/** @brief The square block of exterior cells the engine currently keeps loaded around the player. */
+	struct ExteriorGrid
+	{
+		int32_t originX;  ///< Cell X of the grid's first column.
+		int32_t originY;  ///< Cell Y of the grid's first row.
+		uint32_t width;   ///< Cells per side.
+	};
+
+	/** @brief The loaded exterior grid, or nullopt in an interior, without a worldspace, or before the grid exists. */
+	[[nodiscard]] std::optional<ExteriorGrid> GetExteriorGrid();
+
+	/**
+	 * @brief Terrain of the attached cell at grid column x, row y, or nullptr when its land mesh is not loaded.
+	 * @param a_grid A grid from GetExteriorGrid.
+	 */
+	[[nodiscard]] const RE::TESObjectLAND* GetLoadedLand(const ExteriorGrid& a_grid, uint32_t x, uint32_t y);
 
 	/**
 	 * @brief Derives inward-facing world-space frustum planes from a camera frustum and transform.

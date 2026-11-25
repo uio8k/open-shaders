@@ -111,6 +111,19 @@ namespace Util
 		const void* previousAddress;
 	};
 
+	// Matches the Win32 backend, which marks a stick key down only past 0.10 but still queues the analog value below it.
+	static constexpr float kGamepadStickPressThreshold = 0.10f;
+
+	/** @brief Zeroes queued stick values short of a press and rescales the rest from 0, so a resting stick does not drift nav. */
+	static void FilterGamepadStickEvents()
+	{
+		for (auto& event : ImGui::GetCurrentContext()->InputEventsQueue) {
+			if (event.Type != ImGuiInputEventType_Key || event.Key.Key < ImGuiKey_GamepadLStickLeft || event.Key.Key > ImGuiKey_GamepadRStickDown)
+				continue;
+			event.Key.AnalogValue = event.Key.Down ? std::clamp((event.Key.AnalogValue - kGamepadStickPressThreshold) / (1.0f - kGamepadStickPressThreshold), 0.0f, 1.0f) : 0.0f;
+		}
+	}
+
 	void RefreshScreenScale(HWND hwnd, float bufferWidth, float bufferHeight)
 	{
 		RECT rect{};
@@ -136,6 +149,7 @@ namespace Util
 
 		auto& io = ImGui::GetIO();
 		io.DisplaySize = g_displaySize;
+		FilterGamepadStickEvents();
 
 		POINT cursorPos{};
 		if (GetCursorPos(&cursorPos) &&
@@ -351,25 +365,6 @@ namespace Util
 													  (context.ActiveIdSource == ImGuiInputSource_Mouse && context.ActiveIdMouseButton == button)))
 				return true;
 		return false;
-	}
-
-	namespace
-	{
-		bool debugSectionsHidden = false;
-	}
-
-	HideDebugSectionsGuard::HideDebugSectionsGuard(bool hide) :
-		previous(std::exchange(debugSectionsHidden, hide))
-	{}
-
-	HideDebugSectionsGuard::~HideDebugSectionsGuard()
-	{
-		debugSectionsHidden = previous;
-	}
-
-	bool ShowDebugSections()
-	{
-		return !debugSectionsHidden;
 	}
 
 	void StepFade(float& fade, bool visible, float deltaTime)
@@ -741,6 +736,22 @@ namespace Util
 		ImGui::PushID(id);
 		ImGui::BeginGroup();
 		const float avail = std::max(1.0f, ImGui::GetContentRegionAvail().x - options.reservedWidth);
+		if (options.heading) {
+			MenuFonts::FontRoleGuard caption(Menu::FontRole::Subtext);
+			const ImVec2 textSize = ImGui::CalcTextSize(options.heading);
+			const float headingHeight = pad + textSize.y;
+			const auto top = ImGui::GetCursorScreenPos();
+			const float width = std::min(avail, std::max(trackWidth, textSize.x + (pad + style.FramePadding.x) * 2.0f));
+			const ImVec2 bottom(top.x + width, top.y + headingHeight + trackHeight);
+			auto* drawList = ImGui::GetWindowDrawList();
+			drawList->AddRectFilled(top, bottom, ImGui::GetColorU32(ImGuiCol_FrameBg), trackRounding);
+			const ImVec4 clip(top.x, top.y, bottom.x, top.y + headingHeight);
+			const ImVec2 textPos(top.x + style.FramePadding.x, top.y + pad);
+			drawList->AddText(ImGui::GetFont(), ImGui::GetFontSize(), textPos,
+				ImGui::GetColorU32(ImGuiCol_Text), options.heading, nullptr, 0.0f, &clip);
+			ImGui::Dummy(ImVec2(width, headingHeight));
+			ImGui::SetCursorScreenPos(ImVec2(top.x, top.y + headingHeight));
+		}
 		const bool scroll = options.width <= 0.0f && trackWidth > avail + 0.5f;
 		const float navigationGap = style.ItemInnerSpacing.x;
 		const float navigationSize = std::min(trackHeight, std::max(1.0f, avail));
@@ -770,7 +781,8 @@ namespace Util
 
 		ImDrawList* drawList = ImGui::GetWindowDrawList();
 		const ImVec2 trackMin = ImGui::GetCursorScreenPos();
-		drawList->AddRectFilled(trackMin, ImVec2(trackMin.x + trackWidth, trackMin.y + trackHeight), ImGui::GetColorU32(ImGuiCol_FrameBg), trackRounding);
+		if (!options.heading)
+			drawList->AddRectFilled(trackMin, ImVec2(trackMin.x + trackWidth, trackMin.y + trackHeight), ImGui::GetColorU32(ImGuiCol_FrameBg), trackRounding);
 
 		std::vector<float> xs(segments.size());
 		for (int i = 0; i < count; ++i)
@@ -891,7 +903,7 @@ namespace Util
 	}
 
 	bool SegmentedControl(const char* a_id, const char* const* a_labels, int a_count, int& a_selected, int a_marked,
-		bool a_muted)
+		bool a_muted, const char* heading)
 	{
 		if (!a_labels || a_count <= 0)
 			return false;
@@ -899,7 +911,7 @@ namespace Util
 		for (int i = 0; i < a_count; ++i)
 			segments[i].label = a_labels[i] ? a_labels[i] : "";
 		return SettingsControl::InterceptInt(a_id, a_selected, [&](int& a_bound) {
-			const int clicked = SegmentedControl(a_id, segments, a_bound, { .marked = a_marked, .muted = a_muted });
+			const int clicked = SegmentedControl(a_id, segments, a_bound, { .marked = a_marked, .muted = a_muted, .heading = heading });
 			if (clicked >= 0)
 				a_bound = clicked;
 			return clicked >= 0;
@@ -3466,6 +3478,8 @@ namespace Util
 			ImGui::BeginDisabled(!action.enabled);
 			ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(style.FramePadding.x, 0.0f));
 			action.pressed = ImGui::Button(action.label);
+			if (action.pressed)
+				action.anchor = ImVec2(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y);
 			ImGui::PopStyleVar();
 			ImGui::EndDisabled();
 			ImGui::PopID();
@@ -4490,46 +4504,24 @@ namespace Util
 			return false;
 		}
 
-		ID3D11Resource* pResource = nullptr;
-		try {
-			DX::ThrowIfFailed(DirectX::CreateTexture(device,
-				image.GetImages(), image.GetImageCount(),
-				image.GetMetadata(), &pResource));
-		} catch (const DX::com_exception& e) {
-			logger::warn("LoadDDSTextureFromFile: Failed to create texture: {}", e.what());
+		const auto& metadata = image.GetMetadata();
+		if (metadata.dimension != DirectX::TEX_DIMENSION_TEXTURE2D || metadata.arraySize != 1) {
+			logger::warn("LoadDDSTextureFromFile: Only single 2D DDS textures are supported: {}", filename);
 			return false;
 		}
-
-		ID3D11Texture2D* pTexture = reinterpret_cast<ID3D11Texture2D*>(pResource);
-		D3D11_TEXTURE2D_DESC desc;
-		pTexture->GetDesc(&desc);
-		if (resourceName)
-			SetResourceName(pTexture, "%s", resourceName);
-
-		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {
-			.Format = desc.Format,
-			.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D,
-			.Texture2D = {
-				.MostDetailedMip = 0,
-				.MipLevels = desc.MipLevels }
-		};
-
-		HRESULT hr = device->CreateShaderResourceView(pTexture, &srvDesc, out_srv);
-		if (SUCCEEDED(hr) && *out_srv) {
-			if (resourceName)
-				SetResourceName(*out_srv, "%s SRV", resourceName);
-			else
-				Util::SetResourceName(*out_srv, "UI::DDS:%s", filename);
-		}
-		pTexture->Release();
-
+		const HRESULT hr = DirectX::CreateShaderResourceView(device, image.GetImages(), image.GetImageCount(), metadata, out_srv);
 		if (FAILED(hr) || !*out_srv) {
 			logger::warn("LoadDDSTextureFromFile: Failed to create SRV, HRESULT: 0x{:08X}", static_cast<uint32_t>(hr));
 			return false;
 		}
+		const std::string debugName = resourceName ? std::string(resourceName) : std::format("UI::DDS:{}", filename);
+		Util::SetResourceName(*out_srv, "%s SRV", debugName.c_str());
+		winrt::com_ptr<ID3D11Resource> resource;
+		(*out_srv)->GetResource(resource.put());
+		Util::SetResourceName(resource.get(), "%s", debugName.c_str());
 
-		out_size = ImVec2((float)desc.Width, (float)desc.Height);
-		logger::debug("LoadDDSTextureFromFile: Successfully loaded {} ({}x{})", filename, desc.Width, desc.Height);
+		out_size = ImVec2(static_cast<float>(metadata.width), static_cast<float>(metadata.height));
+		logger::debug("LoadDDSTextureFromFile: Successfully loaded {} ({}x{})", filename, metadata.width, metadata.height);
 		return true;
 	}
 
@@ -4634,6 +4626,7 @@ namespace Util
 				if (RoundedSelectable(T("ui.input.clear_binding", "Clear Binding"), false)) {
 					combo.clear();
 					changed = true;
+					globals::state->CheckCoreSettingsChanged();
 				}
 				ImGui::EndPopup();
 			}

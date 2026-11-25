@@ -54,6 +54,13 @@ struct UnifiedWater : OverlayFeature
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
 
+	/** @brief Hook that repairs shared reflection and normals materials left dangling by water removal before the engine reuses them. */
+	struct TESWaterSystem_AddWater
+	{
+		static void thunk(RE::TESWaterSystem* waterSystem, RE::NiAVObject* water, RE::TESWaterForm* waterType, float waterHeight, const RE::BSTArray<RE::NiPointer<RE::BSMultiBoundAABB>>* multiBounds, bool noDisplacement, bool isProcedural);
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
 	/** @brief Hook that controls water mesh sub-visibility for terrain LOD nodes. */
 	struct BGSTerrainNode_UpdateWaterMeshSubVisibility
 	{
@@ -100,8 +107,10 @@ struct UnifiedWater : OverlayFeature
 		static bool Register();
 	};
 
-	/** @brief Draws the ImGui settings panel for unified water configuration. */
-	virtual void DrawSettings() override;
+	virtual bool HasDebugSection() const override { return true; }
+
+	/** @brief Draws the Debug section (flowmap and water cache regeneration). */
+	virtual void DrawDebugSection() override;
 
 	/** @brief Draws the debug overlay showing water cache build progress. */
 	virtual void DrawOverlay() override;

@@ -700,8 +700,12 @@ namespace ShadowCasterManager
 						snprintf(addrFull, sizeof(addrFull), "0x%016llX", static_cast<unsigned long long>(row.info.lightKey));
 						// Show the resolved world-light name when one exists;
 						// the raw address stays available in the tooltip/copy.
+						ImGui::PushID("address");
+						ImGui::PushID(reinterpret_cast<const void*>(key));
 						ImGui::Selectable(!row.info.name.empty() ? row.info.name.c_str() : addrFull + 10,
 							false, ImGuiSelectableFlags_None);
+						ImGui::PopID();
+						ImGui::PopID();
 						if (ImGui::IsItemClicked())
 							ImGui::SetClipboardText(addrFull);
 						noteHover();
@@ -713,9 +717,11 @@ namespace ShadowCasterManager
 					auto ri = static_cast<uint8_t>(c.x * 255.0f);
 					auto gi = static_cast<uint8_t>(c.y * 255.0f);
 					auto bi = static_cast<uint8_t>(c.z * 255.0f);
+					ImGui::PushID(reinterpret_cast<const void*>(key));
 					ImGui::ColorButton("##col", c,
 						ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoBorder,
 						ImVec2(C::SHADOW_LIGHT_SWATCH_WIDTH * uiScale, C::SHADOW_LIGHT_SWATCH_HEIGHT * uiScale));
+					ImGui::PopID();
 					if (ImGui::IsItemHovered())
 						ImGui::SetTooltip("#%02X%02X%02X", ri, gi, bi);
 				} else if (col == typeColIdx) {
@@ -1665,8 +1671,8 @@ namespace ShadowCasterManager
 											"How a cached shadow follows a flickering light:\n"
 											"Live: the shadow origin follows the light and the cached depth is\n"
 											"copied unmoved, which leaves a small mismatch near occluders.\n"
-											"Pinned: the shadow origin stays at the bake pose, so the shadow\n"
-											"does not move with the flame.\n"
+											"Pinned: the shadow is drawn from where the light rests, so it holds\n"
+											"still while the flame flickers.\n"
 											"Warped: the cached depth is reprojected to the live origin on the\n"
 											"GPU, so the shadow moves with the flame.\n"
 											"P / W in the shadow light table marks lights using Pinned / Warped."));
@@ -1800,9 +1806,24 @@ namespace ShadowCasterManager
 			ImGui::Checkbox(T(TKEY("protect_player_shadows"), "Protect Shadows on the Player"), &settings.ProtectPlayerShadows);
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("%s", T(TKEY("protect_player_shadows_tooltip"),
-											"Ranks every light that reaches the player first and lets it redraw past the\n"
-											"redraw budget, so shadows on the player do not flicker. Costs GPU time\n"
-											"when many lights surround the player."));
+											"Ranks the strongest lights that reach the player first, up to half the\n"
+											"shadow light count, and lets them redraw past the redraw budget, so\n"
+											"shadows on the player do not flicker. Costs GPU time when many lights\n"
+											"surround the player."));
+
+			ImGui::Checkbox(T(TKEY("skip_flame_enclosure"), "Skip a Light's Own Flame Holder"), &settings.SkipFlameEnclosure);
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("%s", T(TKEY("skip_flame_enclosure_tooltip"),
+											"Leaves out of a light's shadow the small part of its own fixture that holds its\n"
+											"flame, such as a lantern's candle or a gem's glass, so it does not throw one big\n"
+											"hard shadow over the floor and walls. The rest of the fixture still casts."));
+
+			ImGui::Checkbox(T(TKEY("fade_shadow_swaps"), "Fade Shadows Between Lights"), &settings.FadeShadowSwaps);
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("%s", T(TKEY("fade_shadow_swaps_tooltip"),
+											"A light that loses its shadow slot fades its shadow out before handing the\n"
+											"slot on, and a light given a slot again fades in, so shadows do not pop in\n"
+											"and out as you walk among many lights."));
 
 			// Atlas is boot-latched (the engine texture allocation depends on
 			// it), so show restart state against the captured boot value.

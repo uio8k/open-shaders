@@ -8,25 +8,47 @@
 #include <catch2/catch_test_macros.hpp>
 
 using Catch::Approx;
+using ShadowCasterManager::CasterChangedSinceBake;
+using ShadowCasterManager::CompositeSkipsCaster;
+using ShadowCasterManager::CountsTowardPoseLatch;
 using ShadowCasterManager::DemandStreakBucket;
+using ShadowCasterManager::EdgeKeepsLight;
 using ShadowCasterManager::EngineShadowSliceCount;
 using ShadowCasterManager::FacingRotation;
+using ShadowCasterManager::FlickerRadiusBand;
+using ShadowCasterManager::FlickerRadiusTolerance;
 using ShadowCasterManager::FrameTimePercentile;
 using ShadowCasterManager::HashCombine;
 using ShadowCasterManager::HashCombineFloat;
+using ShadowCasterManager::HeldFlickerRadius;
+using ShadowCasterManager::HeldLightYields;
 using ShadowCasterManager::HemisphereSeamMargin;
+using ShadowCasterManager::HoldsFlame;
 using ShadowCasterManager::IsPlausibleShadowLightPtr;
+using ShadowCasterManager::KeepsLastValidOnAcquire;
+using ShadowCasterManager::kMaxFlickerRadiusTolerance;
+using ShadowCasterManager::kNotMoving;
 using ShadowCasterManager::kShadowSizeToTexels;
 using ShadowCasterManager::kSlotHoldMargin;
 using ShadowCasterManager::kTileScaleFloor;
 using ShadowCasterManager::kVanillaShadowSliceCount;
+using ShadowCasterManager::MovingUntil;
+using ShadowCasterManager::NoteObjectMove;
+using ShadowCasterManager::ObjectMotion;
+using ShadowCasterManager::ObjectMovingUntil;
+using ShadowCasterManager::PlayerProtectionCap;
+using ShadowCasterManager::ProjectedLightExtent;
 using ShadowCasterManager::QuantizeFloat;
+using ShadowCasterManager::ResumedFadeStart;
+using ShadowCasterManager::ShadowFadeAlpha;
 using ShadowCasterManager::SliceCappedLightCount;
 using ShadowCasterManager::SlotHeldScore;
 using ShadowCasterManager::SphereWhollyBehindPlane;
 using ShadowCasterManager::StallBucket;
+using ShadowCasterManager::SteadyScoreFade;
 using ShadowCasterManager::TileScaleForCoverage;
 using ShadowCasterManager::TileScaleTarget;
+using ShadowCasterManager::WithinFlickerReach;
 
 namespace
 {
@@ -128,6 +150,90 @@ TEST_CASE("SphereWhollyBehindPlane splits straddling from wholly behind", "[scm]
 	// Behind by more than the margin: nothing of it reaches the front map.
 	REQUIRE(SphereWhollyBehindPlane(-10.0f - margin - 0.01f, 10.0f, margin));
 	REQUIRE(SphereWhollyBehindPlane(-500.0f, 10.0f, margin));
+}
+
+TEST_CASE("ObjectMovingUntil holds every part as long as its longest-moving part", "[scm]")
+{
+	int until = ObjectMovingUntil(kNotMoving, 100, 8);
+	REQUIRE(until == 108);
+	until = ObjectMovingUntil(until, 101, 64);
+	REQUIRE(until == 165);
+	REQUIRE(ObjectMovingUntil(until, 102, 8) == 165);
+}
+
+TEST_CASE("An object's motion reads the same to every part in an epoch", "[scm]")
+{
+	ObjectMotion motion;
+	NoteObjectMove(motion, 100, 8);
+	REQUIRE(MovingUntil(motion, 100) == kNotMoving);
+	REQUIRE(MovingUntil(motion, 101) == 108);
+
+	// A part visited before a sibling's move and one visited after read the same value in that epoch.
+	NoteObjectMove(motion, 108, 8);
+	const int before = MovingUntil(motion, 108);
+	NoteObjectMove(motion, 108, 64);
+	REQUIRE(MovingUntil(motion, 108) == before);
+	REQUIRE(MovingUntil(motion, 109) == 172);
+
+	// With no further move the hold ends at the last window.
+	REQUIRE_FALSE(172 < MovingUntil(motion, 109));
+	REQUIRE(171 < MovingUntil(motion, 109));
+}
+
+TEST_CASE("WithinFlickerReach covers every flicker and pulse offset", "[scm]")
+{
+	constexpr float amplitude = 6.0f;
+	for (int i = 0; i < 64; ++i) {
+		const float a = static_cast<float>(i) * 0.1f;
+		// Pulse: a circle of the amplitude, their product on z.
+		REQUIRE(WithinFlickerReach(amplitude * std::cos(a), amplitude * std::sin(a), amplitude * std::sin(a) * std::cos(a), amplitude));
+		for (int j = 0; j < 64; ++j) {
+			const float b = static_cast<float>(j) * 0.1f;
+			// Flicker: two sines scale half the amplitude, which then moves along them and a third sine.
+			const float scaled = amplitude * std::sin(a) * std::sin(b) * 0.5f;
+			REQUIRE(WithinFlickerReach(scaled * std::sin(a), scaled * std::sin(b), scaled, amplitude));
+		}
+	}
+	REQUIRE(WithinFlickerReach(0.0f, 0.0f, 0.0f, amplitude));
+	// No movement amplitude, or a translate the movement cannot reach.
+	REQUIRE_FALSE(WithinFlickerReach(0.0f, 0.0f, 0.0f, 0.0f));
+	REQUIRE_FALSE(WithinFlickerReach(0.0f, 0.0f, 8.0f, amplitude));
+	REQUIRE_FALSE(WithinFlickerReach(40.0f, 0.0f, 0.0f, amplitude));
+}
+
+TEST_CASE("HeldFlickerRadius holds through every flickered radius and follows a real change", "[scm]")
+{
+	constexpr float brightest = 520.0f;
+	constexpr float amplitude = 0.3f;
+	const float band = FlickerRadiusBand(amplitude);
+	// The fade scales between 1 - amplitude and 1; the radius follows its square root.
+	for (int start = 0; start <= 10; ++start) {
+		const float held = brightest * std::sqrt(1.0f - amplitude * static_cast<float>(start) / 10.0f);
+		for (int i = 0; i <= 100; ++i)
+			REQUIRE(HeldFlickerRadius(held, brightest * std::sqrt(1.0f - amplitude * static_cast<float>(i) / 100.0f), band) == held);
+	}
+	REQUIRE(HeldFlickerRadius(brightest, brightest * 1.5f, band) == brightest * 1.5f);
+	REQUIRE(HeldFlickerRadius(brightest, brightest * 0.5f, band) == brightest * 0.5f);
+	// No flicker: only a sub-unit change is held.
+	REQUIRE(FlickerRadiusBand(0.0f) == 0.0f);
+	REQUIRE(HeldFlickerRadius(brightest, brightest + 0.5f, 0.0f) == brightest);
+	REQUIRE(HeldFlickerRadius(brightest, brightest + 2.0f, 0.0f) == brightest + 2.0f);
+}
+
+TEST_CASE("FlickerRadiusTolerance covers a bake and a live radius anywhere in the band", "[scm]")
+{
+	constexpr float brightest = 520.0f;
+	constexpr float amplitude = 0.3f;
+	const float tolerance = FlickerRadiusTolerance(FlickerRadiusBand(amplitude), 0.1f);
+	for (int b = 0; b <= 20; ++b) {
+		const float bake = brightest * std::sqrt(1.0f - amplitude * static_cast<float>(b) / 20.0f);
+		for (int i = 0; i <= 20; ++i) {
+			const float live = brightest * std::sqrt(1.0f - amplitude * static_cast<float>(i) / 20.0f);
+			REQUIRE(std::abs(live - bake) <= tolerance * bake + 1e-3f);
+		}
+	}
+	REQUIRE(FlickerRadiusTolerance(0.0f, 0.1f) == 0.1f);
+	REQUIRE(FlickerRadiusTolerance(FlickerRadiusBand(0.9f), 0.1f) == kMaxFlickerRadiusTolerance);
 }
 
 TEST_CASE("FrameTimePercentile returns the 60fps fallback with no samples", "[scm]")
@@ -256,6 +362,41 @@ TEST_CASE("SliceCappedLightCount keeps the highest point index inside the array"
 			REQUIRE(SliceCappedLightCount(count, slices) < slices);
 }
 
+TEST_CASE("EdgeKeepsLight keeps only a recently valid omni light that is neither hidden nor faded", "[scm]")
+{
+	REQUIRE(EdgeKeepsLight(true, false, false, false));
+	// Not recently valid, hidden, faded out by its level of detail, or a spot light: dropped as before.
+	REQUIRE_FALSE(EdgeKeepsLight(false, false, false, false));
+	REQUIRE_FALSE(EdgeKeepsLight(true, true, false, false));
+	REQUIRE_FALSE(EdgeKeepsLight(true, false, true, false));
+	REQUIRE_FALSE(EdgeKeepsLight(true, false, false, true));
+}
+
+TEST_CASE("KeepsLastValidOnAcquire keeps only this frame's stamp", "[scm]")
+{
+	REQUIRE(KeepsLastValidOnAcquire(120, 120));
+	REQUIRE_FALSE(KeepsLastValidOnAcquire(119, 120));
+	REQUIRE_FALSE(KeepsLastValidOnAcquire(-1, 120));
+}
+
+TEST_CASE("Shadow ranking clips lights crossing the camera plane", "[scm]")
+{
+	REQUIRE(ProjectedLightExtent(0.0f, 1.0f, -3.0f, -1.0f) == 0.0f);
+	REQUIRE(ProjectedLightExtent(1.7f, 0.3f, -0.2f, 0.7f) == 0.0f);
+	REQUIRE(ProjectedLightExtent(0.9f, 0.3f, -0.1f, 1.0f) == Approx(0.2f));
+	REQUIRE(ProjectedLightExtent(-0.9f, 0.3f, -0.1f, 1.0f) == Approx(0.2f));
+	REQUIRE(ProjectedLightExtent(0.0f, 0.5f, -0.1f, 1.0f) == 1.0f);
+}
+
+TEST_CASE("HeldLightYields seats only lights out of view after the lights in view", "[scm]")
+{
+	REQUIRE(HeldLightYields(false, false, false));
+	// Still in view (an engine cull flap at the edge), reaching the player, or hidden: keeps its place.
+	REQUIRE_FALSE(HeldLightYields(true, false, false));
+	REQUIRE_FALSE(HeldLightYields(false, true, false));
+	REQUIRE_FALSE(HeldLightYields(false, false, true));
+}
+
 TEST_CASE("SlotHeldScore keeps a holder against a near-equal challenger", "[scm]")
 {
 	REQUIRE(SlotHeldScore(0.5, false) == 0.5);
@@ -285,4 +426,114 @@ TEST_CASE("PerFrameCache works a key out once per frame and drops it on the next
 	REQUIRE(made == 2);
 	REQUIRE(cache.Get(11, 1, make) == 3);
 	REQUIRE(cache.entries.size() == 1);
+}
+
+TEST_CASE("ShadowFadeAlpha caps the fade-in by the fade-out", "[scm]")
+{
+	constexpr float fadeIn = 0.25f;
+	constexpr float fadeOut = 0.5f;
+	REQUIRE(ShadowFadeAlpha(10.0, -1.0, -1.0, fadeIn, fadeOut) == 1.0f);
+	REQUIRE(ShadowFadeAlpha(10.0, 10.0, -1.0, fadeIn, fadeOut) == 0.0f);
+	REQUIRE(ShadowFadeAlpha(10.125, 10.0, -1.0, fadeIn, fadeOut) == Approx(0.5f));
+	REQUIRE(ShadowFadeAlpha(11.0, 10.0, -1.0, fadeIn, fadeOut) == 1.0f);
+	REQUIRE(ShadowFadeAlpha(10.0, -1.0, 10.0, fadeIn, fadeOut) == 1.0f);
+	REQUIRE(ShadowFadeAlpha(10.25, -1.0, 10.0, fadeIn, fadeOut) == Approx(0.5f));
+	REQUIRE(ShadowFadeAlpha(10.5, -1.0, 10.0, fadeIn, fadeOut) == 0.0f);
+	REQUIRE(ShadowFadeAlpha(10.1, 10.05, 10.0, fadeIn, fadeOut) == Approx(0.2f));
+	REQUIRE(ShadowFadeAlpha(10.2, 10.0, 10.1, fadeIn, fadeOut) == Approx(0.8f));
+}
+
+TEST_CASE("ResumedFadeStart continues from the strength shown", "[scm]")
+{
+	constexpr float duration = 0.25f;
+	for (const float shown : { 0.0f, 0.2f, 0.5f, 1.0f }) {
+		const double start = ResumedFadeStart(20.0, shown, duration);
+		REQUIRE(ShadowFadeAlpha(20.0, start, -1.0, duration, duration) == Approx(shown).margin(1e-5));
+		REQUIRE(ShadowFadeAlpha(20.0 + duration, start, -1.0, duration, duration) == 1.0f);
+	}
+	REQUIRE(ResumedFadeStart(20.0, 2.0f, duration) == Approx(20.0 - duration));
+	REQUIRE(ResumedFadeStart(20.0, -1.0f, duration) == Approx(20.0));
+}
+
+TEST_CASE("A caster that changed class after the bake marks the bake stale", "[scm]")
+{
+	REQUIRE_FALSE(CasterChangedSinceBake(5, 5));
+	REQUIRE_FALSE(CasterChangedSinceBake(4, 5));
+	REQUIRE(CasterChangedSinceBake(6, 5));
+	REQUIRE(CasterChangedSinceBake(0, -1));
+	REQUIRE(CompositeSkipsCaster(false, false));
+	REQUIRE_FALSE(CompositeSkipsCaster(true, false));
+	REQUIRE_FALSE(CompositeSkipsCaster(false, true));
+	REQUIRE(CompositeSkipsCaster(true, true));
+}
+
+TEST_CASE("CountsTowardPoseLatch leaves out a rebake queued only by a class change", "[scm]")
+{
+	REQUIRE_FALSE(CountsTowardPoseLatch(true, true, 0, true));
+	REQUIRE_FALSE(CountsTowardPoseLatch(true, true, 2, true));
+	REQUIRE(CountsTowardPoseLatch(true, true, 3, true));
+	REQUIRE(CountsTowardPoseLatch(true, true, 0, false));
+	REQUIRE(CountsTowardPoseLatch(true, false, 0, true));
+	REQUIRE(CountsTowardPoseLatch(false, true, 0, true));
+}
+
+TEST_CASE("HoldsFlame takes only a small part round or under the flame", "[scm]")
+{
+	SECTION("a part round the flame within its bound and margin")
+	{
+		REQUIRE(HoldsFlame(0.0f, 0.0f, 2.0f, 3.0f, 1.0f));
+		REQUIRE(HoldsFlame(0.0f, 0.0f, 7.0f, 3.0f, 1.0f));
+		REQUIRE_FALSE(HoldsFlame(0.0f, 0.0f, 7.5f, 3.0f, 1.0f));
+		REQUIRE(HoldsFlame(0.0f, 0.0f, 0.0f, 20.0f, 1.0f));
+		REQUIRE_FALSE(HoldsFlame(0.0f, 0.0f, 0.0f, 20.5f, 1.0f));
+		REQUIRE_FALSE(HoldsFlame(0.0f, 0.0f, 0.0f, 0.0f, 1.0f));
+	}
+	SECTION("a Grand soul gem's crystal, not a whole hanging lantern")
+	{
+		REQUIRE(HoldsFlame(0.0f, 0.0f, 12.0f, 17.0f, 1.0f));
+		REQUIRE_FALSE(HoldsFlame(0.0f, 0.0f, 0.0f, 24.0f, 1.0f));
+	}
+	SECTION("a fixture placed at twice its size")
+	{
+		REQUIRE(HoldsFlame(0.0f, 0.0f, 0.0f, 40.0f, 2.0f));
+		REQUIRE(HoldsFlame(0.0f, 0.0f, 14.0f, 6.0f, 2.0f));
+		REQUIRE_FALSE(HoldsFlame(0.0f, 0.0f, 0.0f, 40.5f, 2.0f));
+		REQUIRE(HoldsFlame(0.0f, 0.0f, 0.0f, 20.0f, 0.0f));
+	}
+	SECTION("a candle under a light hung over its wick, not one too far under, beside or over it")
+	{
+		REQUIRE(HoldsFlame(0.0f, 0.0f, -31.0f, 11.8f, 1.0f));
+		REQUIRE_FALSE(HoldsFlame(0.0f, 0.0f, -40.0f, 11.8f, 1.0f));
+		REQUIRE_FALSE(HoldsFlame(20.0f, 0.0f, -31.0f, 11.8f, 1.0f));
+		REQUIRE_FALSE(HoldsFlame(0.0f, 0.0f, 31.0f, 11.8f, 1.0f));
+		REQUIRE(HoldsFlame(0.0f, 0.0f, -62.0f, 23.6f, 2.0f));
+	}
+}
+
+TEST_CASE("SteadyScoreFade averages a flicker but follows a light going out at once", "[scm]")
+{
+	float fade = 1.0f;
+	float lowest = 2.0f, highest = 0.0f;
+	for (int frame = 0; frame < 200; ++frame) {
+		fade = SteadyScoreFade(fade, frame % 2 == 0 ? 0.6f : 1.0f);
+		if (frame > 100) {
+			lowest = std::min(lowest, fade);
+			highest = std::max(highest, fade);
+		}
+	}
+	REQUIRE(highest - lowest < 0.05f);
+	REQUIRE(fade == Approx(0.8f).margin(0.03f));
+	REQUIRE(SteadyScoreFade(0.8f, 0.0f) == 0.0f);
+	REQUIRE(SteadyScoreFade(0.8f, 0.05f) == 0.05f);
+	// A light coming back on is ranked at its live fade at once, not ramped up from its average.
+	REQUIRE(SteadyScoreFade(0.0f, 1.0f) == 1.0f);
+	REQUIRE(SteadyScoreFade(0.05f, 0.7f) == 0.7f);
+}
+
+TEST_CASE("PlayerProtectionCap leaves half the slots to the lights in view", "[scm]")
+{
+	REQUIRE(PlayerProtectionCap(16) == 8);
+	REQUIRE(PlayerProtectionCap(127) == 63);
+	REQUIRE(PlayerProtectionCap(1) == 1);
+	REQUIRE(PlayerProtectionCap(0) == 1);
 }

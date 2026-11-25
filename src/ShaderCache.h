@@ -818,6 +818,8 @@ namespace SIE
 		/** Requests a pixel shader; optional startup precompiles are skipped in background mode. */
 		RE::BSGraphics::PixelShader* GetPixelShader(const RE::BSShader& shader,
 			uint32_t descriptor, bool a_precompile = false);
+		/** @brief The Utility geometry shader that cuts a paraboloid shadow draw's triangles at its hemisphere plane, for a vertex descriptor; null if it cannot compile. */
+		winrt::com_ptr<ID3D11GeometryShader> GetParaboloidClipShader(const RE::BSShader& shader, uint32_t vertexDescriptor, std::optional<uint64_t> a_taskGeneration = std::nullopt);
 		/** @brief Checks that every requested pixel-shader permutation is ready. */
 		bool HasPixelShaders(RE::BSShader::Type type, std::span<const uint32_t> descriptors);
 		RE::BSGraphics::ComputeShader* GetComputeShader(const RE::BSShader& shader,
@@ -1057,20 +1059,6 @@ namespace SIE
 			MTLandLODBlend = 19,
 		};
 
-		static constexpr uint32_t kLightingDryWeather = 1u << 21;
-		static constexpr uint32_t kLightingSnowCoverInactive = 1u << 19;
-		static constexpr uint32_t kLightingNoMeshVariation = 1u << 9;
-		static constexpr uint32_t kVertexNoTreeBend = 1u << 6;
-		static constexpr uint32_t kLightingLinearACEScg = 1u << 7;
-		static constexpr uint32_t kLightingNoLocalLights = 1u << 22;
-		static constexpr uint32_t kLightingSingleClusterLight = 1u << 14;
-
-		static constexpr uint32_t kLightingNoLocalShadowMaps = 1u << 6;
-
-		static constexpr uint32_t kLightingNoLocalContactShadows = 1u << 13;
-
-		static constexpr uint32_t kLightingNoLegacySubsurface = 1u << 17;
-
 		enum class LightingShaderFlags : uint32_t
 		{
 			VC = 1 << 0,
@@ -1081,7 +1069,6 @@ namespace SIE
 			TruePbr = 1 << 3,
 			Deferred = 1 << 4,
 			LandscapeSeams = 1 << 5,
-			IBLLuminanceRatio = 1 << 8,
 			// Community Shaders end
 			Specular = 1 << 9,
 			SoftLighting = 1 << 10,
@@ -1102,25 +1089,6 @@ namespace SIE
 			FurShells = 1u << 30,
 			FurShellsDepth = 1u << 31
 		};
-
-		/** @brief True for the mesh techniques specialized for unvaried textures. */
-		static constexpr bool SupportsMeshVariationVariant(uint32_t a_descriptor)
-		{
-			if (a_descriptor & static_cast<uint32_t>(LightingShaderFlags::FurShells))
-				return false;
-
-			switch (static_cast<LightingShaderTechniques>((a_descriptor >> 24) & 0x3F)) {
-			case LightingShaderTechniques::None:
-			case LightingShaderTechniques::Envmap:
-			case LightingShaderTechniques::Glowmap:
-			case LightingShaderTechniques::Parallax:
-			case LightingShaderTechniques::ParallaxOcc:
-			case LightingShaderTechniques::MultilayerParallax:
-				return true;
-			default:
-				return false;
-			}
-		}
 
 		enum class BloodSplatterShaderTechniques
 		{
@@ -1197,9 +1165,6 @@ namespace SIE
 			Flowmap = 1 << 9,           // 0x200
 			BlendNormals = 1 << 10,     // 0x400
 		};
-
-		static constexpr uint32_t kEffectLinearACEScg = 1u << 9;
-		static constexpr uint32_t kEffectAmbientWorldIBL = 1u << 28;
 
 		enum class EffectShaderFlags
 		{
@@ -1455,6 +1420,8 @@ namespace SIE
 		std::mutex vertexShadersMutex;
 		std::mutex pixelShadersMutex;
 		std::mutex computeShadersMutex;
+		std::mutex paraboloidClipMutex;
+		ankerl::unordered_dense::map<uint32_t, winrt::com_ptr<ID3D11GeometryShader>> paraboloidClipShaders;
 		CompilationSet compilationSet;
 		ankerl::unordered_dense::map<std::string, ShaderCacheResult> shaderMap{};
 		std::mutex mapMutex;                                                                      // guard for shaderMap

@@ -35,13 +35,6 @@ namespace Util
 	/** @brief Returns the actor's normalized aim direction in Skyrim's Z-up world space. */
 	[[nodiscard]] float3 GetAimDirection(RE::Actor& a_actor) noexcept;
 
-	/** @brief True when the node, or the nearest ancestor with an owner, belongs to an actor (held weapons, scabbards, anim objects). */
-	[[nodiscard]] inline bool IsOwnedByActor(const RE::NiAVObject& a_node)
-	{
-		const auto* owner = a_node.GetUserData();
-		return owner && owner->IsActor();
-	}
-
 	/** @brief A Havok or Gamebryo point as the float3 the shaders and constant buffers use. */
 	inline float3 ToFloat3(const RE::NiPoint3& a_point)
 	{
@@ -113,6 +106,14 @@ namespace Util
 	void ForEachGeometry(RE::NiAVObject* a_root, const std::function<void(RE::BSGeometry*)>& a_callback);
 
 	/**
+	 * @brief Visits every collision object below a scenegraph root without trusting a child array the game is releasing.
+	 * @param a_root Scenegraph root to traverse; kept referenced for the duration of the walk.
+	 * @param a_func Callback invoked for each collision object; return kStop to end the walk.
+	 * @return The last control value returned by the callback.
+	 */
+	RE::BSVisit::BSVisitControl TraverseCollision(RE::NiAVObject* a_root, const std::function<RE::BSVisit::BSVisitControl(RE::bhkNiCollisionObject*)>& a_func);
+
+	/**
 	 * @brief Visits geometry in both first- and third-person actor roots.
 	 * @param a_actor Actor whose loaded geometry should be traversed.
 	 * @param a_callback Callback invoked for each geometry.
@@ -169,7 +170,7 @@ namespace Util
 		if (auto root = actor->Get3D(false)) {
 			bool found = false;
 			RE::NiPoint3 ragdollCenter;
-			RE::BSVisit::TraverseScenegraphCollision(root, [&](RE::bhkNiCollisionObject* a_object) -> RE::BSVisit::BSVisitControl {
+			Util::TraverseCollision(root, [&](RE::bhkNiCollisionObject* a_object) -> RE::BSVisit::BSVisitControl {
 				float radius = 0.0f;
 				RE::NiPoint3 centerPos;
 				if (Util::GetShapeBound(a_object, centerPos, radius)) {

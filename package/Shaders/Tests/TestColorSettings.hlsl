@@ -270,15 +270,27 @@ static float emissiveMult = 1.0;
 	SharedData::csUtilitySettings.emitColor = float2(0.5, -0.5);
 	SharedData::csUtilitySettings.emitColorMult = 1.0;
 	const float3 input = float3(0.2, 0.5, 0.8);
-	const float gains[3] = { 0.0, 0.25, 4.0 };
+	const float gains[5] = { -4.0, -0.25, 0.0, 0.25, 4.0 };
 	for (uint gamut = 0; gamut < 2; gamut++) {
 		SharedData::linearLightingSettings.enableACEScg = gamut;
 		emissiveMult = 1.0;
 		float3 reference = Color::EmitColor(input);
-		for (uint i = 0; i < 3; i++) {
+		for (uint i = 0; i < 5; i++) {
 			emissiveMult = gains[i];
 			ASSERT(IsTrue, all(abs(Color::EmitColor(input * gains[i]) - reference * gains[i]) < 0.00001));
 		}
+	}
+
+	SharedData::csUtilitySettings.emitColor = float2(1.0, 0.0);
+	SharedData::csUtilitySettings.glowmapColor = float2(1.0, 0.0);
+	SharedData::csUtilitySettings.glowmapMult = 1.0;
+	emissiveMult = 1.0;
+	const float3 sampleColor = float3(0.8, 0.1, 0.0);
+	const float3 tint = float3(1.0, 0.3, 0.0);
+	for (uint gamut = 0; gamut < 2; gamut++) {
+		SharedData::linearLightingSettings.enableACEScg = gamut;
+		ASSERT(IsTrue, all(abs(Color::Glowmap(sampleColor) - Color::GamutTransform(sampleColor)) < 0.00001));
+		ASSERT(IsTrue, all(abs(Color::EmitColor(tint) - Color::GamutTransform(tint)) < 0.00001));
 	}
 }
 

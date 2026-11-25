@@ -1,5 +1,7 @@
 #include "Streamline.h"
 #include "Features/ReverseZ.h"
+#include "Utils/Game.h"
+#include "Utils/RenderExtent.h"
 
 #include <algorithm>
 #include <bit>
@@ -542,7 +544,7 @@ bool Streamline::CheckFrameConstants(sl::ViewportHandle p_viewport, uint32_t eye
 	sl::Constants slConstants = {};
 
 	// Calculate aspect ratio for the SINGLE EYE
-	float eyeWidth = state->screenSize.x * (globals::game::isVR ? 0.5f : 1.0f);
+	float eyeWidth = Util::EyeWidth(state->screenSize.x);
 	slConstants.cameraAspectRatio = eyeWidth / state->screenSize.y;
 
 	slConstants.cameraFOV = Util::GetVerticalFOVRad();
@@ -732,6 +734,9 @@ bool Streamline::EvaluateDLSS(sl::ViewportHandle vp, uint32_t eyeIndex,
 	const sl::Extent& extentIn, const sl::Extent& extentOut, uint32_t outputWidth,
 	uint32_t outputHeight)
 {
+	if (Util::IsMinimizedExtent(extentIn.width, extentIn.height) || Util::IsMinimizedExtent(extentOut.width, extentOut.height))
+		return false;
+
 	auto context = globals::d3d::context;
 
 	sl::Resource colorInRes = { sl::ResourceType::eTex2d, colorIn, 0 };

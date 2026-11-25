@@ -28,6 +28,7 @@
 #include "Features/InteriorSun.h"
 #include "Features/LightLimitFix.h"
 #include "Features/PostProcessing.h"
+#include "Features/ProceduralAurora.h"
 #include "Features/RainRefraction.h"
 #include "Features/RemoteControl/FrameRecorder.h"
 #include "Features/RemoteControl/NvPerf.h"
@@ -40,7 +41,6 @@
 #include "Features/VolumetricLighting.h"
 #include "Features/Wind/Wind.h"
 
-#include <array>
 #include <optional>
 #include <unordered_map>
 
@@ -52,56 +52,6 @@ namespace
 	std::mutex ShaderBytecodeMutex;
 	std::mutex ShaderDumpMutex;
 
-	struct VertexShaderVariants
-	{
-		RE::BSShader* owner = nullptr;
-		RE::BSGraphics::VertexShader* selected = nullptr;
-		std::array<RE::BSGraphics::VertexShader*, 2> shaders{};
-		std::array<bool, 2> requested{};
-		uint64_t frame = 0;
-		uint32_t descriptor = 0;
-	};
-
-	thread_local VertexShaderVariants vertexShaderVariants;
-
-	bool HasCompatibleVertexConstants(const RE::BSGraphics::VertexShader& standard, const RE::BSGraphics::VertexShader& variant)
-	{
-		return standard.constantTable == variant.constantTable &&
-		       std::ranges::equal(standard.constantBuffers, variant.constantBuffers,
-				   [](const auto& left, const auto& right) {
-					   return left.buffer == right.buffer && (left.buffer || left.data == right.data);
-				   });
-	}
-
-	void SelectVertexShader(State& state, RE::BSShader& shader, bool allowNoTreeBend)
-	{
-		auto& variants = vertexShaderVariants;
-		if (variants.frame != state.frameCount || variants.owner != &shader || variants.descriptor != state.modifiedVertexDescriptor ||
-			!variants.selected || state.currentShader != &shader || state.customVertexShader != variants.selected)
-			return;
-
-		constexpr auto treeBend = static_cast<uint32_t>(State::ExtraShaderDescriptors::TreeBend);
-		const size_t variant = allowNoTreeBend && (state.permutationData.ExtraShaderDescriptor & treeBend) == 0;
-		if (variant != 0 && !variants.requested[variant]) {
-			variants.requested[variant] = true;
-			const auto descriptor = variants.descriptor | SIE::ShaderCache::kVertexNoTreeBend;
-			variants.shaders[variant] = globals::shaderCache->GetVertexShader(shader, descriptor);
-		}
-		auto* vertexShader = variants.shaders[variant];
-		const bool usesCustomConstantLayout = *globals::game::currentVertexShader == state.customVertexShader;
-		if (!vertexShader || (usesCustomConstantLayout && variants.shaders[0] && !HasCompatibleVertexConstants(*variants.shaders[0], *vertexShader)))
-			vertexShader = variants.shaders[0];
-		if (state.customVertexShader == vertexShader)
-			return;
-
-		globals::d3d::context->VSSetShader(Util::AsReal(vertexShader->shader), nullptr, 0);
-		if (usesCustomConstantLayout)
-			*globals::game::currentVertexShader = vertexShader;
-		state.customVertexShader = vertexShader;
-		variants.selected = vertexShader;
-		globals::game::stateUpdateFlags->set(RE::BSGraphics::DIRTY_VERTEX_DESC);
-	}
-
 	void NormalizeLegacyUtilityDescriptors(const RE::BSShader& a_shader, uint& a_vertexDescriptor, uint& a_pixelDescriptor)
 	{
 		if (a_shader.shaderType.get() != RE::BSShader::Type::Utility ||
@@ -111,6 +61,33 @@ namespace
 		a_vertexDescriptor = LegacyGraphicsCompatibility::NormalizeLegacyUtilityDescriptor(a_vertexDescriptor);
 		a_pixelDescriptor = LegacyGraphicsCompatibility::NormalizeLegacyUtilityDescriptor(a_pixelDescriptor);
 	}
+
+	bool ParaboloidClipAllowed = false;
+	bool ParaboloidClipBound = false;
+
+	/// Binds the paraboloid clip geometry shader with our Utility paraboloid shadow vertex shader, and unbinds it for every other one.
+	void SetParaboloidClipShader(const RE::BSShader* a_shader, uint32_t a_vertexDescriptor, bool a_customVertexShader)
+	{
+		winrt::com_ptr<ID3D11GeometryShader> geometryShader;
+		if (ParaboloidClipAllowed && a_customVertexShader && a_shader)
+			geometryShader = globals::shaderCache->GetParaboloidClipShader(*a_shader, a_vertexDescriptor);
+		if (geometryShader || ParaboloidClipBound) {
+			globals::d3d::context->GSSetShader(geometryShader.get(), nullptr, 0);
+			ParaboloidClipBound = geometryShader != nullptr;
+		}
+	}
+}
+
+Hooks::ParaboloidClipScope::ParaboloidClipScope()
+{
+	ParaboloidClipAllowed = true;
+}
+
+Hooks::ParaboloidClipScope::~ParaboloidClipScope()
+{
+	ParaboloidClipAllowed = false;
+	ParaboloidClipBound = false;
+	globals::d3d::context->GSSetShader(nullptr, nullptr, 0);
 }
 
 void RegisterShaderBytecode(void* Shader, const void* Bytecode, size_t BytecodeLength)
@@ -205,10 +182,8 @@ struct BSShader_LoadShaders
 				auto vertexShaderDesriptor = entry->id;
 				auto pixelShaderDescriptor = entry->id;
 				NormalizeLegacyUtilityDescriptors(*shader, vertexShaderDesriptor, pixelShaderDescriptor);
-				auto forwardVertexDescriptor = vertexShaderDesriptor;
-				auto forwardPixelDescriptor = pixelShaderDescriptor;
-				state->ModifyShaderLookup(*shader, forwardVertexDescriptor, forwardPixelDescriptor);
-				shaderCache->GetPixelShader(*shader, forwardPixelDescriptor, true);
+				state->ModifyShaderLookup(*shader, vertexShaderDesriptor, pixelShaderDescriptor);
+				shaderCache->GetPixelShader(*shader, pixelShaderDescriptor, true);
 				state->ModifyShaderLookup(*shader, vertexShaderDesriptor, pixelShaderDescriptor, true);
 				shaderCache->GetPixelShader(*shader, pixelShaderDescriptor, true);
 			}
@@ -278,6 +253,7 @@ bool Hooks::BSShader_BeginTechnique::thunk(RE::BSShader* shader, uint32_t vertex
 		} else {
 			state->settingCustomShader = true;
 			globals::d3d::context->VSSetShader(Util::AsReal(vertexShader->shader), NULL, NULL);
+			SetParaboloidClipShader(shader, state->modifiedVertexDescriptor, true);
 			state->customVertexShader = vertexShader;
 			*globals::game::currentVertexShader = vertexShader;
 			globals::game::stateUpdateFlags->set(RE::BSGraphics::DIRTY_VERTEX_DESC);
@@ -295,14 +271,6 @@ bool Hooks::BSShader_BeginTechnique::thunk(RE::BSShader* shader, uint32_t vertex
 
 	state->lastModifiedVertexDescriptor = state->modifiedVertexDescriptor;
 	state->lastModifiedPixelDescriptor = state->modifiedPixelDescriptor;
-	auto* standardVertexShader = type == RE::BSShader::Type::Lighting || type == RE::BSShader::Type::Utility ? state->customVertexShader : nullptr;
-	vertexShaderVariants = {
-		.owner = shader,
-		.selected = standardVertexShader,
-		.shaders = { standardVertexShader },
-		.frame = state->frameCount,
-		.descriptor = state->modifiedVertexDescriptor
-	};
 
 	return shaderFound;
 }
@@ -313,12 +281,8 @@ namespace LightingExtensions
 	{
 		static void thunk(RE::BSShader* shader, RE::BSRenderPass* pass, uint32_t renderFlags)
 		{
-			auto* state = globals::state;
-			state->UpdateLightingShaderPermutation(pass);
+			globals::state->UpdateLightingShaderPermutation(pass);
 			func(shader, pass, renderFlags);
-			const bool specializeReflection = (state->permutationData.ExtraShaderDescriptor & static_cast<uint32_t>(State::ExtraShaderDescriptors::IsReflections)) &&
-			                                  !globals::game::isVR;
-			SelectVertexShader(*state, *shader, globals::deferred->deferredPass || specializeReflection);
 			globals::deferred->BindForwardHairMasks();
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -428,6 +392,11 @@ namespace GrassExtensions
 	};
 }
 
+bool Hooks::IsGrassMeshLoadHookInstalled()
+{
+	return GrassExtensions::LoadGrassType::func.address() != 0;
+}
+
 namespace WaterBlendHistory
 {
 	struct BSImagespaceShader_Render
@@ -500,6 +469,7 @@ namespace WeatherExtensions
 				globals::features::effects11.OnSkyUpdateColors(sky);
 #endif
 			globals::features::skySync.OnSkyUpdateColors(sky);
+			globals::features::proceduralAurora.OnSkyUpdate(sky);
 			Feature::ForEachLoadedFeature("OnWeatherColorsUpdated", [sky](Feature* feature) { feature->OnWeatherColorsUpdated(sky); });
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -725,16 +695,9 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChain(
 void Hooks::BSGraphics_SetDirtyStates::thunk(bool isCompute)
 {
 	func(isCompute);
-	auto& state = *globals::state;
-	if (!isCompute && state.currentShader && state.currentShader->shaderType.get() == RE::BSShader::Type::Utility) {
-		constexpr uint32_t depthPass =
-			static_cast<uint32_t>(SIE::ShaderCache::UtilityShaderFlags::RenderDepth) |
-			static_cast<uint32_t>(SIE::ShaderCache::UtilityShaderFlags::RenderShadowmap);
-		SelectVertexShader(state, *state.currentShader, (state.modifiedVertexDescriptor & depthPass) != 0);
-	}
-	state.Draw();
+	globals::state->Draw();
 	if (!isCompute) {
-		state.BindVertexPermutationData();
+		globals::state->BindVertexPermutationData();
 		VanillaBinding::BindDrawResources();
 	}
 }
@@ -849,6 +812,20 @@ bool Hooks::InstallBeforeInputPoll()
 	return stl::detour_thunk<BSInputDeviceManager_BeforeInputPoll>(REL::RelocationID(67315, 68617)) == NO_ERROR;
 }
 
+/** @brief Whether the input event chain holds a mouse wheel button event. */
+static bool HasMouseWheelEvent(const RE::InputEvent* a_event)
+{
+	for (; a_event; a_event = a_event->next) {
+		const auto* button = a_event->AsButtonEvent();
+		if (button && button->GetDevice() == RE::INPUT_DEVICE::kMouse) {
+			const auto code = button->GetIDCode();
+			if (code == RE::BSWin32MouseDevice::Key::kWheelUp || code == RE::BSWin32MouseDevice::Key::kWheelDown)
+				return true;
+		}
+	}
+	return false;
+}
+
 struct BSInputDeviceManager_PollInputDevices
 {
 	static void thunk(RE::BSTEventSource<RE::InputEvent*>* a_dispatcher, RE::InputEvent* const* a_events)
@@ -868,7 +845,7 @@ struct BSInputDeviceManager_PollInputDevices
 
 		if (a_events) {
 			if (auto* inputManager = RE::BSInputDeviceManager::GetSingleton()) {
-				if (const auto* mouse = inputManager->GetMouse())
+				if (const auto* mouse = inputManager->GetMouse(); mouse && HasMouseWheelEvent(*a_events))
 					menu->RecordDirectInputWheelDelta(mouse->GetRuntimeData().dInputNextState.z);
 			}
 			menu->ProcessInputEvents(a_events);
@@ -906,18 +883,15 @@ struct BSInputDeviceManager_PollInputDevices
 			}
 		}
 
-		if (blockedDevice && menu->ShouldSwallowInput()) {  //the menu is open, eat all keypresses
-			// During active flying preview, let input reach the game for movement/camera
-			if (menu->IsPreviewFlying()) {
-				func(a_dispatcher, a_events);
-				return;
-			}
+		// The menu is open, eat all keypresses; during active flying preview, let input reach the game for movement/camera
+		if (blockedDevice && menu->ShouldSwallowInput() && !menu->IsPreviewFlying()) {
 			constexpr RE::InputEvent* const dummy[] = { nullptr };
 			func(a_dispatcher, dummy);
 			return;
 		}
 
 		func(a_dispatcher, a_events);
+		globals::features::screenshotFeature.SuppressVanillaMultiScreenshot();
 	}
 	static inline REL::Relocation<decltype(thunk)> func;
 };
@@ -1122,6 +1096,7 @@ namespace Hooks
 						RE::BSGraphics::VertexShader* vertexShader = shaderCache->GetVertexShader(*currentShader, state->modifiedVertexDescriptor);
 						if (vertexShader) {
 							globals::d3d::context->VSSetShader(Util::AsReal(vertexShader->shader), NULL, NULL);
+							SetParaboloidClipShader(currentShader, state->modifiedVertexDescriptor, true);
 							state->customVertexShader = vertexShader;
 							*globals::game::currentVertexShader = a_vertexShader;
 							globals::game::stateUpdateFlags->set(RE::BSGraphics::DIRTY_VERTEX_DESC);
@@ -1136,6 +1111,7 @@ namespace Hooks
 			state->customVertexShader = nullptr;
 			*globals::game::currentVertexShader = a_vertexShader;
 			globals::d3d::context->VSSetShader(Util::AsReal(a_vertexShader->shader), NULL, NULL);
+			SetParaboloidClipShader(nullptr, 0, false);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
@@ -1581,9 +1557,8 @@ namespace Hooks
 		// 0x4F5 decodes as a stray TEST, not a CALL, on 1.7.99 -- the two offsets are not interchangeable.
 		stl::write_thunk_call<GrassExtensions::BSGrassShaderProperty_ctor>(REL::RelocationID(15214, 15383).address() + REL::Relocate<std::uintptr_t>(0x45B, REL::Module::IsAtLeast(REL::Version(1, 7, 99, 0)) ? 0x4FD : 0x4F5));
 		stl::write_vfunc<0x6, GrassExtensions::BSGrassShader_SetupGeometry>(RE::VTABLE_BSGrassShader[0]);
-		stl::write_thunk_call<GrassExtensions::LoadGrassType>(REL::RelocationID(15204, 15372).address() + Util::VersionedRelocation::Select(0x2F5, 0x2F5, 0x305));
-		stl::write_thunk_call<GrassExtensions::LoadGrassType>(REL::RelocationID(15205, 15373).address() + Util::VersionedRelocation::Select(0x62B, 0x597, 0x590));
-		stl::write_thunk_call<GrassExtensions::LoadGrassType>(REL::RelocationID(15206, 15374).address() + REL::Relocate(0x25C, 0x25C));
+		// NGIO can call the loader outside the engine's grass tasks.
+		stl::detour_thunk<GrassExtensions::LoadGrassType>(REL::RelocationID(15214, 15383));
 		stl::write_vfunc<0x0, GrassExtensions::BSMultiStreamInstanceTriShape_dtor>(RE::VTABLE_BSMultiStreamInstanceTriShape[0]);
 		stl::write_vfunc<0x6, PostProcessingExtensions::BSParticleShader_SetupGeometry>(RE::VTABLE_BSParticleShader[0]);
 

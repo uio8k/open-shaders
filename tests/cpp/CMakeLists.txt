@@ -89,6 +89,7 @@ add_executable(
     test_hdr_png_metadata.cpp
     test_cacheinvalidation.cpp
     test_compilededupe.cpp
+    test_shadercompileflags.cpp
     test_shaderdescriptor.cpp
     test_contenthash.cpp
     test_shadercachemanifest.cpp
@@ -98,6 +99,7 @@ add_executable(
     test_shadercacheclear.cpp
     test_generationclaim.cpp
     test_framelatch.cpp
+    test_render_extent.cpp
     test_dlssg_input_fence.cpp
     test_lightattachgate.cpp
     test_pointersearch.cpp
@@ -115,8 +117,12 @@ add_executable(
     test_sehguard.cpp
     test_nr_decisions.cpp
     test_nr_cadence.cpp
+    test_nr_combat_pause.cpp
     test_nr_material_strength.cpp
+    test_nr_material_selection.cpp
     test_nr_model_scale.cpp
+    test_nr_model_reconstruction.cpp
+    test_nr_peripheral_compression.cpp
     test_nr_eye_mode.cpp
     test_nr_context_profile.cpp
     test_nr_roi.cpp
@@ -163,6 +169,11 @@ target_include_directories(
     cpp_tests
     SYSTEM
     PRIVATE "${CMAKE_SOURCE_DIR}/extern/AntiLag2-SDK"
+)
+
+target_compile_definitions(
+    cpp_tests
+    PRIVATE CPP_TEST_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
 )
 
 # Exercise capture policy in both production and DevBench configurations.

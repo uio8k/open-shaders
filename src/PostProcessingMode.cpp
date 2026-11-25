@@ -176,7 +176,7 @@ namespace PostProcessingMode
 			ApplyPending();
 	}
 
-	void DrawSelector(const SelectorAction* action)
+	void DrawSelector()
 	{
 		std::array<Mode, kModeCount> modes{};
 		std::array<const char*, kModeCount> labels{};
@@ -196,12 +196,8 @@ namespace PostProcessingMode
 		if (CanUseEffects11())
 			addSegment(Mode::Effects11, T("ui.post_processing_mode.effects11", "Effects 11"));
 
-		const float rowTop = ImGui::GetCursorPosY();
-		ImGui::PushID("PostProcessingMode");
-		ImGui::BeginGroup();
-		ImGui::AlignTextToFramePadding();
-		ImGui::TextWrapped("%s", T("ui.post_processing_mode.label", "Rendering Pipeline"));
-		const bool changed = Util::SegmentedControl("##Pipeline", labels.data(), count, selected);
+		const bool changed = Util::SegmentedControl("##Pipeline", labels.data(), count, selected, -1, false,
+			T("ui.post_processing_mode.label", "Rendering Pipeline"));
 		// Re-clicking the active mode must not undo a manual Linear Lighting opt-out.
 		if (changed && modes[selected] != current) {
 			Set(modes[selected]);
@@ -209,25 +205,7 @@ namespace PostProcessingMode
 			// Set() may have turned Linear Lighting on, which the host page's own feature check does not cover.
 			globals::state->CheckFeatureSettingsChanged(&globals::features::linearLighting);
 		}
-		ImGui::EndGroup();
-		ImGui::PopID();
-
 		Util::AddTooltip(T("ui.post_processing_mode.tooltip",
 			"Only one pipeline runs at a time. Vanilla uses the game's original post processing."));
-
-		if (!action || !action->label)
-			return;
-
-		// The page's action sits on the selector's row, flush right and as tall as the selector
-		const float rowBottom = ImGui::GetCursorPosY();
-		const float stripHeight = rowBottom - rowTop - ImGui::GetStyle().ItemSpacing.y;
-		const float buttonWidth = ImGui::CalcTextSize(action->label).x + ImGui::GetStyle().FramePadding.x * 4.0f;
-		const float right = ImGui::GetContentRegionMax().x;
-		ImGui::SetCursorPos(ImVec2(right - buttonWidth, rowTop));
-		if (Util::Button(action->label, ImVec2(buttonWidth, stripHeight)) && action->onClick)
-			action->onClick();
-		if (action->tooltip)
-			Util::AddTooltip(action->tooltip);
-		ImGui::SetCursorPosY(rowBottom);
 	}
 }

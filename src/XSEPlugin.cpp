@@ -1,3 +1,4 @@
+#include "BuildInfo.h"
 #include "Compatibility.h"
 #include "Deferred.h"
 #include "Features/Upscaling.h"
@@ -88,6 +89,13 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 			else
 				logger::info("Registered Community Shaders API message listener during PostLoad");
 
+			break;
+		}
+	case SKSE::MessagingInterface::kPreLoadGame:
+	case SKSE::MessagingInterface::kNewGame:
+		{
+			if (errors.empty())
+				Feature::ForEachLoadedFeature("GameReset", [](Feature* feature) { feature->GameReset(); });
 			break;
 		}
 	case SKSE::MessagingInterface::kPostPostLoad:

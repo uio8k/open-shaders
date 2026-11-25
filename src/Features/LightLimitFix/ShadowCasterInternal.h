@@ -38,6 +38,19 @@ namespace ShadowCasterManager
 	/// True while a flickering light keeps its baked static shadow across small pose drift.
 	inline bool TolerantSplit() { return s_settings.TolerantSplitCache; }
 
+	/// The placed reference a scene object belongs to, as T, or null. SEH-guarded: GetUserData walks NiAVObject::parent, which is
+	/// not refcounted and can dangle during scene teardown.
+	template <class T>
+	T* OwnerAs(const RE::NiAVObject* a_object) noexcept
+	{
+		__try {
+			auto* ref = a_object->GetUserData();
+			return ref ? ref->As<T>() : nullptr;
+		} __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+		}
+		return nullptr;
+	}
+
 	// External conflict detection
 	extern bool s_externalConflict;
 	extern std::string s_conflictMessage;
@@ -97,6 +110,9 @@ namespace ShadowCasterManager
 	// Wall-clock seconds to blend in a shadow after its caster gains a slot (new/promoted/recovered
 	// light) -- softens the pop instead of an instant shadow on an already-visible light.
 	inline constexpr float kShadowFadeInSeconds = 0.25f;
+
+	// Wall-clock seconds a light that fell outside the shadow count keeps its slot while its shadow fades out.
+	inline constexpr float kShadowFadeOutSeconds = 0.25f;
 
 	// Occluded redraw ceiling = RedrawIntervalMaxFrames * this multiplier.
 	inline constexpr float kOccludedRedrawMultiplier = 6.0f;
@@ -295,6 +311,9 @@ namespace ShadowCasterManager
 	/// (either person): held torches and Candlelight-style spell lights.
 	bool IsPlayerAttachedLight(const RE::NiLight* ni);
 
+	/// The actor whose 3D holds this object, or null; safe while the scene tears down.
+	RE::Actor* CarrierOf(const RE::NiAVObject* ni) noexcept;
+
 	/// Geometric + photometric per-light signals computed once per candidate.
 	struct LightGeometry
 	{
@@ -369,6 +388,7 @@ namespace ShadowCasterManager
 	extern std::atomic<uint32_t> s_hemisphereDropCount;
 	extern std::atomic<uint64_t> s_hemisphereDropTotal;
 	extern std::atomic<uint64_t> s_passlessCasterSkipTotal;
+	extern std::atomic<uint64_t> s_flameHolderSkipTotal;
 	/// Indexed by the classifier's PasslessReason (0 unused).
 	extern std::atomic<uint64_t> s_passlessCasterSkipByReason[5];
 	extern std::atomic<uint32_t> s_frontAppendCount;
@@ -467,6 +487,10 @@ namespace ShadowCasterManager
 	extern std::uint64_t s_visitStaticHash;
 	extern std::atomic<uint32_t> s_visitDynamicCount;
 	extern std::atomic<uint32_t> s_visitStaticCount;
+	/// Classifier epoch the current light's cached bake was taken at.
+	extern int s_visitBakeEpoch;
+	/// The current walk met a caster whose class changed after that bake, so the bake no longer matches the scene.
+	extern bool s_visitBakeStale;
 
 	/// Per-caster movement-history record; classification memoized once per
 	/// frame by ClassifyCaster (ShadowCasterClassifier.cpp).
@@ -482,11 +506,15 @@ namespace ShadowCasterManager
 		uint64_t foldHash = 0;
 		bool foldHashValid = false;
 		bool dynamic = true;
-		bool actorAttached = false;  ///< parented under an actor's skeleton
-		int ancestryEpoch = -1;      ///< epoch of the last parent-chain walk
+		bool actorAttached = false;                ///< parented under an actor's skeleton
+		int ancestryEpoch = -1;                    ///< epoch of the last parent-chain walk
+		int classEpoch = -1;                       ///< epoch its static / dynamic class last changed after its first sighting
+		const RE::TESObjectREFR* owner = nullptr;  ///< reference the geometry belongs to; its parts move as one
 	};
 	// Pruned periodically by ScheduleShadowCasters (ShadowScheduler.cpp).
 	extern ankerl::unordered_dense::map<RE::BSGeometry*, CasterMobility> s_casterMobility;
+	/// Motion of each reference's casters; a key only, never dereferenced.
+	extern ankerl::unordered_dense::map<const RE::TESObjectREFR*, ObjectMotion> s_ownerMotion;
 	extern int s_casterClassEpoch;
 
 	// Camera position captured at accumulate start (EnableLight, writer); the
